@@ -17,6 +17,7 @@ hex = "0.4"
 rcgen = "0.13"
 x509-parser = "0.16"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging"] }
+quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring", "log"] }
 thiserror = "2"
 tokio = { version = "1", features = ["io-util", "rt", "macros", "net", "time", "sync"] }
 
