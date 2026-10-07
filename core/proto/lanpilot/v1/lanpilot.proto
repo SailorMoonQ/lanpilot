@@ -1,0 +1,217 @@
+syntax = "proto3";
+
+package lanpilot.v1;
+
+// Rules for evolving this file:
+// - Never reuse or renumber a field or enum value. Mark removed ones `reserved`.
+// - New fields must be optional in meaning: old peers ignore them.
+
+enum Os {
+  OS_UNSPECIFIED = 0;
+  OS_WINDOWS = 1;
+  OS_LINUX = 2;
+  OS_MACOS = 3;
+  OS_IOS = 4;
+  OS_ANDROID = 5;
+}
+
+// First message on the first bidirectional stream, sent by the client.
+message StreamOpen {
+  oneof kind {
+    Hello hello = 1;
+    PairRequest pair = 2;
+  }
+}
+
+// Exchanged in both directions at session start.
+message Hello {
+  uint32 proto_min = 1;
+  uint32 proto_max = 2;
+  string app_version = 3;
+  repeated string capabilities = 4;
+  string device_name = 5;
+  Os os = 6;
+}
+
+// Client -> server, on the control stream.
+message ClientMessage {
+  uint64 request_id = 1;
+  oneof body {
+    PointerButton pointer_button = 10;
+    KeyChord key_chord = 11;
+    Text text = 12;
+    Media media = 13;
+    RunCommand run_command = 14;
+    Unpair unpair = 15;
+  }
+}
+
+// Server -> client, on the control stream. `request_id` is 0 for pushes.
+message ServerMessage {
+  uint64 request_id = 1;
+  oneof body {
+    Ack ack = 10;
+    Error error = 11;
+    CommandResult command_result = 12;
+    CommandList command_list = 13;
+  }
+}
+
+// Sent as a QUIC datagram. Totals are cumulative since the gesture started.
+message PointerDatagram {
+  GestureState gesture = 1;
+}
+
+// gesture_id strictly increases per session. seq starts at 1 per gesture and
+// strictly increases for every datagram of that gesture.
+message GestureState {
+  uint32 gesture_id = 1;
+  uint32 seq = 2;
+  float total_dx = 3;
+  float total_dy = 4;
+  float total_scroll_x = 5;
+  float total_scroll_y = 6;
+}
+
+enum MouseButton {
+  MOUSE_BUTTON_UNSPECIFIED = 0;
+  MOUSE_BUTTON_LEFT = 1;
+  MOUSE_BUTTON_RIGHT = 2;
+  MOUSE_BUTTON_MIDDLE = 3;
+}
+
+message PointerButton {
+  MouseButton button = 1;
+  bool down = 2;
+  // Latest gesture state at the moment of the button event, so the server can
+  // catch up on pointer motion before applying the button.
+  GestureState gesture = 3;
+}
+
+// Keys are USB HID keyboard page (0x07) usage IDs.
+// Pressed in order, released in reverse order.
+message KeyChord {
+  repeated uint32 usages = 1;
+}
+
+message Text {
+  string text = 1;
+}
+
+enum MediaAction {
+  MEDIA_ACTION_UNSPECIFIED = 0;
+  MEDIA_ACTION_PLAY_PAUSE = 1;
+  MEDIA_ACTION_NEXT = 2;
+  MEDIA_ACTION_PREVIOUS = 3;
+  MEDIA_ACTION_VOLUME_UP = 4;
+  MEDIA_ACTION_VOLUME_DOWN = 5;
+  MEDIA_ACTION_MUTE = 6;
+}
+
+message Media {
+  MediaAction action = 1;
+}
+
+message RunCommand {
+  string command_id = 1;
+}
+
+message Unpair {}
+
+message Ack {}
+
+enum ErrorCode {
+  ERROR_CODE_UNSPECIFIED = 0;
+  ERROR_CODE_BAD_REQUEST = 1;
+  ERROR_CODE_NOT_FOUND = 2;
+  ERROR_CODE_PAUSED = 3;
+  ERROR_CODE_UNSUPPORTED = 4;
+  ERROR_CODE_INTERNAL = 5;
+}
+
+message Error {
+  ErrorCode code = 1;
+  string message = 2;
+}
+
+message CommandResult {
+  bool ok = 1;
+  string error = 2;
+  optional int32 exit_code = 3;
+  string output = 4;
+}
+
+message CommandInfo {
+  string id = 1;
+  string name = 2;
+  string icon = 3;
+  bool confirm = 4;
+}
+
+message CommandList {
+  repeated CommandInfo commands = 1;
+}
+
+// Pairing. Client -> server inside StreamOpen.pair.
+message PairRequest {
+  string device_name = 1;
+  Os os = 2;
+  oneof method {
+    QrPairing qr = 10;
+    PasswordPairing password = 11;
+  }
+}
+
+message QrPairing {
+  bytes token = 1;
+}
+
+message PasswordPairing {
+  bytes spake_msg = 1;
+}
+
+// Server -> client, password pairing only.
+message PairChallenge {
+  bytes spake_msg = 1;
+  bytes server_confirm = 2;
+}
+
+// Client -> server, password pairing only.
+message PairConfirm {
+  bytes client_confirm = 1;
+}
+
+enum PairRejectReason {
+  PAIR_REJECT_REASON_UNSPECIFIED = 0;
+  PAIR_REJECT_REASON_BAD_TOKEN = 1;
+  PAIR_REJECT_REASON_BAD_PASSWORD = 2;
+  PAIR_REJECT_REASON_LOCKED = 3;
+  PAIR_REJECT_REASON_DISABLED = 4;
+  PAIR_REJECT_REASON_DENIED = 5;
+}
+
+message PairResult {
+  bool accepted = 1;
+  PairRejectReason reason = 2;
+  string server_name = 3;
+  Os server_os = 4;
+  // Seconds until password pairing unlocks, when reason is LOCKED.
+  uint32 retry_after_secs = 5;
+}
+
+// Server -> client on the pairing stream.
+message PairServerMessage {
+  oneof body {
+    PairChallenge challenge = 1;
+    PairResult result = 2;
+  }
+}
+
+// Encoded into the pairing QR code.
+message PairingInvite {
+  repeated string addrs = 1;
+  uint32 port = 2;
+  bytes server_public_key = 3;
+  bytes token = 4;
+  string server_name = 5;
+}
