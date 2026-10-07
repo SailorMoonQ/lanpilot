@@ -131,3 +131,177 @@ fn unknown_fields_are_ignored() {
     let decoded = Hello::decode(bytes.as_slice()).unwrap();
     assert_eq!(decoded.proto_max, 1);
 }
+
+#[test]
+fn v1_pair_request_qr() {
+    check(
+        "v1_pair_request_qr",
+        StreamOpen {
+            kind: Some(stream_open::Kind::Pair(PairRequest {
+                device_name: "iPhone".into(),
+                os: Os::Ios as i32,
+                method: Some(pair_request::Method::Qr(QrPairing {
+                    token: vec![2u8; 16],
+                })),
+            })),
+        },
+    );
+}
+
+#[test]
+fn v1_pair_request_password() {
+    check(
+        "v1_pair_request_password",
+        StreamOpen {
+            kind: Some(stream_open::Kind::Pair(PairRequest {
+                device_name: "Pixel".into(),
+                os: Os::Android as i32,
+                method: Some(pair_request::Method::Password(PasswordPairing {
+                    spake_msg: vec![3u8; 33],
+                })),
+            })),
+        },
+    );
+}
+
+#[test]
+fn v1_pair_challenge() {
+    check(
+        "v1_pair_challenge",
+        PairServerMessage {
+            body: Some(pair_server_message::Body::Challenge(PairChallenge {
+                spake_msg: vec![4u8; 33],
+                server_confirm: vec![5u8; 32],
+            })),
+        },
+    );
+}
+
+#[test]
+fn v1_pair_result_locked() {
+    check(
+        "v1_pair_result_locked",
+        PairServerMessage {
+            body: Some(pair_server_message::Body::Result(PairResult {
+                accepted: false,
+                reason: PairRejectReason::Locked as i32,
+                server_name: String::new(),
+                server_os: Os::Unspecified as i32,
+                retry_after_secs: 120,
+            })),
+        },
+    );
+}
+
+#[test]
+fn v1_pointer_button() {
+    check(
+        "v1_pointer_button",
+        ClientMessage {
+            request_id: 3,
+            body: Some(client_message::Body::PointerButton(PointerButton {
+                button: MouseButton::Left as i32,
+                down: true,
+                gesture: Some(GestureState {
+                    gesture_id: 7,
+                    seq: 43,
+                    total_dx: 14.0,
+                    total_dy: -2.5,
+                    total_scroll_x: 0.0,
+                    total_scroll_y: 0.0,
+                }),
+            })),
+        },
+    );
+}
+
+#[test]
+fn v1_key_chord() {
+    check(
+        "v1_key_chord",
+        ClientMessage {
+            request_id: 4,
+            // Left Ctrl + C.
+            body: Some(client_message::Body::KeyChord(KeyChord {
+                usages: vec![0xE0, 0x06],
+            })),
+        },
+    );
+}
+
+#[test]
+fn v1_text() {
+    check(
+        "v1_text",
+        ClientMessage {
+            request_id: 5,
+            body: Some(client_message::Body::Text(Text {
+                text: "你好, world".into(),
+            })),
+        },
+    );
+}
+
+#[test]
+fn v1_media() {
+    check(
+        "v1_media",
+        ClientMessage {
+            request_id: 6,
+            body: Some(client_message::Body::Media(Media {
+                action: MediaAction::PlayPause as i32,
+            })),
+        },
+    );
+}
+
+#[test]
+fn v1_unpair() {
+    check(
+        "v1_unpair",
+        ClientMessage {
+            request_id: 7,
+            body: Some(client_message::Body::Unpair(Unpair {})),
+        },
+    );
+}
+
+#[test]
+fn v1_command_list() {
+    check(
+        "v1_command_list",
+        ServerMessage {
+            request_id: 0,
+            body: Some(server_message::Body::CommandList(CommandList {
+                commands: vec![
+                    CommandInfo {
+                        id: "open-vscode".into(),
+                        name: "Open VS Code".into(),
+                        icon: "code".into(),
+                        confirm: false,
+                    },
+                    CommandInfo {
+                        id: "shutdown".into(),
+                        name: "Shut down".into(),
+                        icon: "power".into(),
+                        confirm: true,
+                    },
+                ],
+            })),
+        },
+    );
+}
+
+#[test]
+fn v1_error() {
+    check(
+        "v1_error",
+        ServerMessage {
+            request_id: 8,
+            body: Some(server_message::Body::Error(Error {
+                code: ErrorCode::NotFound as i32,
+                message: "no such command".into(),
+            })),
+        },
+    );
+}
