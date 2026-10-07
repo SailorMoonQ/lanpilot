@@ -5,7 +5,7 @@ use lanpilot_core::pairing::flow::{
     serve_pairing,
 };
 use lanpilot_core::pairing::invite::Invite;
-use lanpilot_core::pairing::password::{ClientHandshake, MAX_FAILURES, PasswordAttempts};
+use lanpilot_core::pairing::password::{ClientHandshake, MAX_FAILURES, PasswordAttempts, Reserved};
 use lanpilot_core::pairing::tokens::TokenStore;
 use lanpilot_core::proto::v1::{
     Os, PairConfirm, PairRejectReason, PairRequest, PairResult, PairServerMessage, PasswordPairing,
@@ -55,7 +55,7 @@ impl PairingAuthority for TestAuthority {
     fn password(&self) -> Option<String> {
         self.password.clone()
     }
-    fn password_begin(&self) -> Result<(), Duration> {
+    fn password_begin(&self) -> Result<Reserved, Duration> {
         self.attempts.lock().unwrap().begin(Instant::now())
     }
     fn password_succeeded(&self) {

@@ -4,7 +4,7 @@ use crate::framing::{FrameError, read_msg, write_msg};
 use crate::identity::PublicKey;
 use crate::pairing::invite::Invite;
 use crate::pairing::password::{
-    ClientHandshake, Role, confirmation, server_handshake, verify_confirmation,
+    ClientHandshake, Reserved, Role, confirmation, server_handshake, verify_confirmation,
 };
 use crate::proto::v1::{
     Os, PairChallenge, PairConfirm, PairRejectReason, PairRequest, PairResult, PairServerMessage,
@@ -60,8 +60,11 @@ pub trait PairingAuthority: Send + Sync {
     fn server_os(&self) -> Os;
     fn consume_token(&self, token: &[u8]) -> bool;
     fn password(&self) -> Option<String>;
-    /// Reserves and counts one password attempt. `Err` means locked, with the time left.
-    fn password_begin(&self) -> Result<(), Duration>;
+    /// Reserves and counts one password attempt (see
+    /// [`PasswordAttempts::begin`](crate::pairing::password::PasswordAttempts::begin)).
+    /// `Err` means locked, with the time left. `Reserved::now_locked` is true
+    /// when this attempt started the lockout, so the user can be notified.
+    fn password_begin(&self) -> Result<Reserved, Duration>;
     fn password_succeeded(&self);
     fn approve(&self, device: &NewDevice) -> impl Future<Output = bool> + Send;
 }

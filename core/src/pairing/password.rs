@@ -118,6 +118,14 @@ pub fn verify_confirmation(
     mac(key, role, client, server).verify_slice(tag).is_ok()
 }
 
+/// A reserved password attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Reserved {
+    /// True when this reservation used up the last attempt and started the
+    /// lockout, so the server can notify the user (spec 4.3).
+    pub now_locked: bool,
+}
+
 /// Online-guess limiter. Callers hold one shared instance for the whole server
 /// under one lock, call `begin` before sending any SPAKE2 message, and call
 /// `record_success` only after the client's confirmation verifies.
@@ -134,8 +142,9 @@ impl PasswordAttempts {
 
     /// Reserves one attempt. If locked, returns the time left without counting.
     /// Otherwise the attempt is counted as a failure immediately and `Ok` is
-    /// returned; only `record_success` undoes it.
-    pub fn begin(&mut self, now: Instant) -> Result<(), Duration> {
+    /// returned; only `record_success` undoes it. `now_locked` is true for the
+    /// reservation that starts the lockout.
+    pub fn begin(&mut self, now: Instant) -> Result<Reserved, Duration> {
         match self.locked_until {
             Some(until) if now < until => return Err(until - now),
             Some(_) => {
@@ -145,10 +154,11 @@ impl PasswordAttempts {
             None => {}
         }
         self.failures += 1;
-        if self.failures >= MAX_FAILURES {
+        let now_locked = self.failures >= MAX_FAILURES;
+        if now_locked {
             self.locked_until = Some(now + LOCKOUT);
         }
-        Ok(())
+        Ok(Reserved { now_locked })
     }
 
     pub fn record_success(&mut self) {
@@ -229,6 +239,19 @@ mod tests {
             assert!(a.begin(t0).is_ok());
         }
         assert_eq!(a.begin(t0).unwrap_err(), LOCKOUT);
+    }
+
+    #[test]
+    fn last_reservation_reports_the_lock() {
+        let t0 = Instant::now();
+        let mut a = PasswordAttempts::new();
+        for _ in 0..MAX_FAILURES - 1 {
+            assert_eq!(a.begin(t0), Ok(Reserved { now_locked: false }));
+        }
+        assert_eq!(a.begin(t0), Ok(Reserved { now_locked: true }));
+        assert!(a.begin(t0).is_err());
+        // After the lockout, counting starts over.
+        assert_eq!(a.begin(t0 + LOCKOUT), Ok(Reserved { now_locked: false }));
     }
 
     #[test]
