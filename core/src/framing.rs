@@ -30,6 +30,13 @@ where
     Ok(())
 }
 
+/// Reads one length-prefixed message. Returns `Ok(None)` on a clean end of
+/// stream before the first byte of a frame.
+///
+/// Not cancel-safe: if the future is dropped mid-frame, the bytes already
+/// consumed are lost and the stream is desynchronized. Never use it inside
+/// `select!` or timeouts that may cancel it; give each stream a dedicated
+/// reader task and forward the messages over a channel instead.
 pub async fn read_msg<M, R>(r: &mut R) -> Result<Option<M>, FrameError>
 where
     M: prost::Message + Default,
