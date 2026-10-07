@@ -5,6 +5,9 @@ package lanpilot.v1;
 // Rules for evolving this file:
 // - Never reuse or renumber a field or enum value. Mark removed ones `reserved`.
 // - New fields must be optional in meaning: old peers ignore them.
+// - Pairing (PairRequest, PairChallenge, PairConfirm, PairResult,
+//   PairServerMessage) is not version-negotiated: no Hello precedes it. It may
+//   only evolve by adding new PairRequest.method variants or optional fields.
 
 enum Os {
   OS_UNSPECIFIED = 0;

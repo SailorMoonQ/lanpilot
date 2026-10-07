@@ -63,6 +63,8 @@ pub fn server_endpoint(
     Ok(quinn::Endpoint::server(config, addr)?)
 }
 
+/// Client endpoint. It binds IPv4 only (`0.0.0.0:0`), so it can reach IPv4
+/// servers only; IPv6 and link-local addresses are not supported yet.
 pub fn client_endpoint(identity: &Identity) -> Result<quinn::Endpoint, TransportError> {
     let tls = client_config(identity, ALPN)?;
     let quic =
