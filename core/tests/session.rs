@@ -88,6 +88,41 @@ async fn version_mismatch_is_reported_on_both_sides() {
 }
 
 #[tokio::test]
+async fn received_hello_names_are_sanitized() {
+    let p = common::connected(&Identity::generate(), &Identity::generate()).await;
+    let dirty = |name: &str| Hello {
+        proto_min: 1,
+        proto_max: 1,
+        device_name: name.into(),
+        ..Default::default()
+    };
+
+    let server = tokio::spawn({
+        let conn = p.server.clone();
+        let server_hello = dirty("\u{202E}Desk\u{0}");
+        async move {
+            let Opened::Session {
+                mut send, hello, ..
+            } = accept_open(&conn).await.unwrap()
+            else {
+                panic!("expected a session");
+            };
+            answer_hello(&mut send, &server_hello, &hello)
+                .await
+                .unwrap();
+            hello
+        }
+    });
+
+    let session = open_session(&p.client, &dirty("\u{2066}iPhone\n\u{200B}"))
+        .await
+        .unwrap();
+    let seen = server.await.unwrap();
+    assert_eq!(session.server_hello.device_name, "Desk");
+    assert_eq!(seen.device_name, "iPhone");
+}
+
+#[tokio::test]
 async fn pair_request_is_recognized() {
     let p = common::connected(&Identity::generate(), &Identity::generate()).await;
     let (mut send, _recv) = p.client.open_bi().await.unwrap();

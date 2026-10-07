@@ -10,6 +10,7 @@ use crate::proto::v1::{
     Os, PairChallenge, PairConfirm, PairRejectReason, PairRequest, PairResult, PairServerMessage,
     PasswordPairing, QrPairing, StreamOpen, pair_request, pair_server_message, stream_open,
 };
+use crate::text::sanitize_display_name;
 use crate::transport::{TransportError, connect, finish_and_confirm, peer_public_key};
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -97,7 +98,7 @@ pub async fn serve_pairing<A: PairingAuthority>(
 ) -> Result<Option<NewDevice>, PairingFlowError> {
     let device = NewDevice {
         public_key: peer_public_key(conn)?,
-        name: request.device_name.clone(),
+        name: sanitize_display_name(&request.device_name),
         os: os_from(request.os),
     };
 
@@ -219,7 +220,7 @@ fn into_paired(
     if result.accepted {
         Ok(PairedServer {
             public_key: server_key,
-            name: result.server_name,
+            name: sanitize_display_name(&result.server_name),
             os: os_from(result.server_os),
         })
     } else {
@@ -340,4 +341,20 @@ async fn password_exchange(
     write_msg(&mut send, &confirm).await?;
     finish(&mut send)?;
     read_result(&mut recv).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn server_name_from_result_is_sanitized() {
+        let result = PairResult {
+            accepted: true,
+            server_name: "\u{202E}Desk\u{0}".into(),
+            ..Default::default()
+        };
+        let paired = into_paired(result, PublicKey([1u8; 32])).unwrap();
+        assert_eq!(paired.name, "Desk");
+    }
 }

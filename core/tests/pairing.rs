@@ -152,6 +152,21 @@ async fn accepted_result_survives_immediate_connection_drop() {
 }
 
 #[tokio::test]
+async fn device_name_is_sanitized_before_approval() {
+    let s = server();
+    let auth = TestAuthority::new(None, true);
+    let invite = invite_for(&s, auth.issue_token(), s.id.public_key());
+    let task = serve_one(&s, auth.clone());
+    let client = client_endpoint(&Identity::generate()).unwrap();
+    pair_with_invite(&client, &invite, " \u{202E}iPhone\u{0}\n", Os::Ios)
+        .await
+        .unwrap();
+    let device = task.await.unwrap().unwrap().unwrap();
+    assert_eq!(device.name, "iPhone");
+    assert_eq!(*auth.approved.lock().unwrap(), vec!["iPhone".to_owned()]);
+}
+
+#[tokio::test]
 async fn qr_token_cannot_be_reused() {
     let s = server();
     let auth = TestAuthority::new(None, true);

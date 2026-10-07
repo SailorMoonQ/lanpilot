@@ -4,6 +4,7 @@
 
 use crate::framing::{FrameError, read_msg, write_msg};
 use crate::proto::v1::{Hello, Os, PairRequest, StreamOpen, stream_open};
+use crate::text::sanitize_display_name;
 use crate::transport::finish_and_confirm;
 use crate::version::{PROTO_MAX, PROTO_MIN, VersionMismatch, negotiate};
 
@@ -21,13 +22,14 @@ pub enum SessionError {
     Version(#[from] VersionMismatch),
 }
 
+/// Our Hello. `device_name` is sanitized like any name a peer would display.
 pub fn local_hello(device_name: &str, os: Os, app_version: &str, capabilities: &[&str]) -> Hello {
     Hello {
         proto_min: PROTO_MIN,
         proto_max: PROTO_MAX,
         app_version: app_version.to_owned(),
         capabilities: capabilities.iter().map(|c| (*c).to_owned()).collect(),
-        device_name: device_name.to_owned(),
+        device_name: sanitize_display_name(device_name),
         os: os as i32,
     }
 }
@@ -49,7 +51,10 @@ pub async fn accept_open(conn: &quinn::Connection) -> Result<Opened, SessionErro
     let (send, mut recv) = conn.accept_bi().await?;
     let open: StreamOpen = read_msg(&mut recv).await?.ok_or(SessionError::Closed)?;
     match open.kind {
-        Some(stream_open::Kind::Hello(hello)) => Ok(Opened::Session { send, recv, hello }),
+        Some(stream_open::Kind::Hello(mut hello)) => {
+            hello.device_name = sanitize_display_name(&hello.device_name);
+            Ok(Opened::Session { send, recv, hello })
+        }
         Some(stream_open::Kind::Pair(request)) => Ok(Opened::Pair {
             send,
             recv,
@@ -101,7 +106,8 @@ pub async fn open_session(
         kind: Some(stream_open::Kind::Hello(local.clone())),
     };
     write_msg(&mut send, &open).await?;
-    let server_hello: Hello = read_msg(&mut recv).await?.ok_or(SessionError::Closed)?;
+    let mut server_hello: Hello = read_msg(&mut recv).await?.ok_or(SessionError::Closed)?;
+    server_hello.device_name = sanitize_display_name(&server_hello.device_name);
     let version = negotiate(
         (local.proto_min, local.proto_max),
         (server_hello.proto_min, server_hello.proto_max),
@@ -112,4 +118,15 @@ pub async fn open_session(
         server_hello,
         version,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn local_hello_sanitizes_device_name() {
+        let hello = local_hello(" \u{202E}Desk\n", Os::Linux, "0.1.0", &[]);
+        assert_eq!(hello.device_name, "Desk");
+    }
 }

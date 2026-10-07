@@ -2,6 +2,7 @@
 
 use crate::identity::PublicKey;
 use crate::proto::v1::PairingInvite;
+use crate::text::sanitize_display_name;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use prost::Message;
@@ -40,6 +41,7 @@ impl Invite {
         format!("{PREFIX}{}", URL_SAFE_NO_PAD.encode(raw.encode_to_vec()))
     }
 
+    /// Parses and validates a pairing URI. `server_name` is sanitized for display.
     pub fn from_uri(uri: &str) -> Result<Self, InviteError> {
         let data = uri.strip_prefix(PREFIX).ok_or(InviteError::NotLanpilot)?;
         let bytes = URL_SAFE_NO_PAD
@@ -72,7 +74,7 @@ impl Invite {
             port,
             server_public_key,
             token,
-            server_name: raw.server_name,
+            server_name: sanitize_display_name(&raw.server_name),
         })
     }
 }
@@ -100,6 +102,16 @@ mod tests {
             "no base64 padding"
         );
         assert_eq!(Invite::from_uri(&uri).unwrap(), sample());
+    }
+
+    #[test]
+    fn server_name_is_sanitized() {
+        let mut dirty = sample();
+        dirty.server_name = "\u{202E}Desk\n\u{200B}".into();
+        assert_eq!(
+            Invite::from_uri(&dirty.to_uri()).unwrap().server_name,
+            "Desk"
+        );
     }
 
     #[test]

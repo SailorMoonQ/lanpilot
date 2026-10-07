@@ -1,6 +1,7 @@
 //! mDNS advertisement (PC) and browsing (phone). See spec section 3.1.
 
 use crate::proto::v1::Os;
+use crate::text::sanitize_display_name;
 use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -67,10 +68,14 @@ fn os_from_str(s: &str) -> Os {
 }
 
 impl Advertisement {
+    /// TXT properties. The name is sanitized with [`sanitize_display_name`]
+    /// and clipped (on a char boundary) so `name=<value>` fits one TXT entry.
     pub fn txt(&self) -> Vec<(String, String)> {
+        let name = sanitize_display_name(&self.name);
+        let name = clip_utf8(&name, MAX_TXT_ENTRY_BYTES - "name=".len());
         vec![
             ("id".into(), self.short_id.clone()),
-            ("name".into(), self.name.clone()),
+            ("name".into(), name.to_owned()),
             ("os".into(), os_to_str(self.os).into()),
             (
                 "proto".into(),
@@ -80,7 +85,17 @@ impl Advertisement {
     }
 }
 
-const MAX_NAME_CHARS: usize = 64;
+/// A TXT record entry (`key=value`) is at most 255 bytes.
+const MAX_TXT_ENTRY_BYTES: usize = 255;
+
+/// Longest prefix of `s` that fits in `max` bytes without splitting a char.
+fn clip_utf8(s: &str, max: usize) -> &str {
+    let mut end = s.len().min(max);
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
 
 /// A short ID is exactly 16 lowercase hex characters.
 fn is_valid_short_id(s: &str) -> bool {
@@ -89,14 +104,9 @@ fn is_valid_short_id(s: &str) -> bool {
 
 pub fn parse_txt(props: &HashMap<String, String>) -> Option<(String, String, Os, u32, u32)> {
     let id = props.get("id").filter(|s| is_valid_short_id(s))?.clone();
-    let name: String = props
+    let name = props
         .get("name")
-        .map(|n| {
-            n.chars()
-                .filter(|c| !c.is_control())
-                .take(MAX_NAME_CHARS)
-                .collect()
-        })
+        .map(|n| sanitize_display_name(n))
         .unwrap_or_default();
     let os = os_from_str(props.get("os").map(String::as_str).unwrap_or_default());
     let (min, max) = props.get("proto")?.split_once('-')?;
@@ -147,6 +157,7 @@ pub struct Advertiser {
 }
 
 impl Advertiser {
+    /// Starts advertising `ad`. The advertised name is sanitized (see [`Advertisement::txt`]).
     pub fn start(ad: &Advertisement) -> Result<Self, DiscoveryError> {
         let daemon = ServiceDaemon::new()?;
         let props: HashMap<String, String> = ad.txt().into_iter().collect();
@@ -315,11 +326,25 @@ mod tests {
     #[test]
     fn name_is_sanitized() {
         let mut map: HashMap<String, String> = ad().txt().into_iter().collect();
-        map.insert("name".into(), format!("a\u{0}b\nc{}", "x".repeat(100)));
+        map.insert(
+            "name".into(),
+            format!(" a\u{0}b\u{202E}\nc\u{200B}{}", "x".repeat(100)),
+        );
         let name = parse_txt(&map).unwrap().1;
-        assert!(name.starts_with("abcx"));
+        assert!(name.starts_with("abcx"), "{name:?}");
         assert_eq!(name.chars().count(), 64);
-        assert!(!name.chars().any(char::is_control));
+    }
+
+    #[test]
+    fn advertised_name_is_sanitized_and_fits_a_txt_entry() {
+        let mut a = ad();
+        a.name = format!("\u{202E}{}", "\u{1D54F}".repeat(100));
+        let txt = a.txt();
+        let (key, value) = txt.iter().find(|(k, _)| k == "name").unwrap();
+        assert!(key.len() + 1 + value.len() <= MAX_TXT_ENTRY_BYTES);
+        assert!(!value.contains('\u{202E}'));
+        assert!(value.chars().all(|c| c == '\u{1D54F}'));
+        assert!(!value.is_empty());
     }
 
     #[test]
