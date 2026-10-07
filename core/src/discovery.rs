@@ -36,8 +36,12 @@ pub struct DiscoveredDevice {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum DiscoveryEvent {
+    /// Consumers must treat this as an upsert keyed by `short_id`: mDNS
+    /// re-announcements produce repeated `Found` events for the same device.
     Found(DiscoveredDevice),
-    Lost { short_id: String },
+    Lost {
+        short_id: String,
+    },
 }
 
 fn os_to_str(os: Os) -> &'static str {
@@ -76,19 +80,65 @@ impl Advertisement {
     }
 }
 
-pub fn parse_txt(props: &HashMap<String, String>) -> Option<(String, String, Os, u32, u32)> {
-    let id = props.get("id").filter(|s| !s.is_empty())?.clone();
-    let name = props.get("name").cloned().unwrap_or_default();
-    let os = os_from_str(props.get("os").map(String::as_str).unwrap_or_default());
-    let (min, max) = props.get("proto")?.split_once('-')?;
-    Some((id, name, os, min.parse().ok()?, max.parse().ok()?))
+const MAX_NAME_CHARS: usize = 64;
+
+/// A short ID is exactly 16 lowercase hex characters.
+fn is_valid_short_id(s: &str) -> bool {
+    s.len() == 16 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
+pub fn parse_txt(props: &HashMap<String, String>) -> Option<(String, String, Os, u32, u32)> {
+    let id = props.get("id").filter(|s| is_valid_short_id(s))?.clone();
+    let name: String = props
+        .get("name")
+        .map(|n| {
+            n.chars()
+                .filter(|c| !c.is_control())
+                .take(MAX_NAME_CHARS)
+                .collect()
+        })
+        .unwrap_or_default();
+    let os = os_from_str(props.get("os").map(String::as_str).unwrap_or_default());
+    let (min, max) = props.get("proto")?.split_once('-')?;
+    let (min, max): (u32, u32) = (min.parse().ok()?, max.parse().ok()?);
+    if min > max {
+        return None;
+    }
+    Some((id, name, os, min, max))
+}
+
+/// Instance name of a LanPilot service fullname, only if it is a valid short ID.
 fn short_id_from_fullname(fullname: &str) -> Option<String> {
     fullname
         .strip_suffix(SERVICE_TYPE)
         .and_then(|s| s.strip_suffix('.'))
+        .filter(|s| is_valid_short_id(s))
         .map(str::to_owned)
+}
+
+/// Builds a device from a resolved service, dropping it unless the TXT `id`
+/// equals the mDNS instance name (otherwise a LAN peer could claim any identity).
+fn resolved_to_event(
+    fullname: &str,
+    props: &HashMap<String, String>,
+    mut addrs: Vec<IpAddr>,
+    port: u16,
+) -> Option<DiscoveredDevice> {
+    let instance = short_id_from_fullname(fullname)?;
+    let (short_id, name, os, proto_min, proto_max) = parse_txt(props)?;
+    if short_id != instance {
+        return None;
+    }
+    addrs.sort();
+    Some(DiscoveredDevice {
+        short_id,
+        name,
+        os,
+        proto_min,
+        proto_max,
+        addrs,
+        port,
+    })
 }
 
 pub struct Advertiser {
@@ -144,20 +194,12 @@ impl Browser {
                         .iter()
                         .map(|p| (p.key().to_owned(), p.val_str().to_owned()))
                         .collect();
-                    let Some((short_id, name, os, proto_min, proto_max)) = parse_txt(&props) else {
-                        continue;
-                    };
-                    let mut addrs: Vec<IpAddr> = info.get_addresses().iter().copied().collect();
-                    addrs.sort();
-                    return Some(DiscoveryEvent::Found(DiscoveredDevice {
-                        short_id,
-                        name,
-                        os,
-                        proto_min,
-                        proto_max,
-                        addrs,
-                        port: info.get_port(),
-                    }));
+                    let addrs: Vec<IpAddr> = info.get_addresses().iter().copied().collect();
+                    if let Some(device) =
+                        resolved_to_event(info.get_fullname(), &props, addrs, info.get_port())
+                    {
+                        return Some(DiscoveryEvent::Found(device));
+                    }
                 }
                 ServiceEvent::ServiceRemoved(_, fullname) => {
                     if let Some(short_id) = short_id_from_fullname(&fullname) {
@@ -217,6 +259,67 @@ mod tests {
         let mut map: HashMap<String, String> = ad().txt().into_iter().collect();
         map.insert("os".into(), "plan9".into());
         assert_eq!(parse_txt(&map).unwrap().2, Os::Unspecified);
+    }
+
+    #[test]
+    fn mismatched_instance_and_txt_id_is_dropped() {
+        let map: HashMap<String, String> = ad().txt().into_iter().collect();
+        assert!(
+            resolved_to_event("fedcba9876543210._lanpilot._udp.local.", &map, vec![], 1).is_none()
+        );
+        assert!(resolved_to_event("evil._lanpilot._udp.local.", &map, vec![], 1).is_none());
+    }
+
+    #[test]
+    fn non_hex_or_wrong_length_id_is_rejected() {
+        for bad in [
+            "0123456789ABCDEF",
+            "0123456789abcde",
+            "0123456789abcdeg",
+            "",
+        ] {
+            let mut map: HashMap<String, String> = ad().txt().into_iter().collect();
+            map.insert("id".into(), bad.into());
+            assert!(parse_txt(&map).is_none(), "{bad:?}");
+            assert_eq!(
+                short_id_from_fullname(&format!("{bad}._lanpilot._udp.local.")),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn matching_instance_and_id_yields_device() {
+        let map: HashMap<String, String> = ad().txt().into_iter().collect();
+        let a: IpAddr = "192.168.1.9".parse().unwrap();
+        let b: IpAddr = "10.0.0.2".parse().unwrap();
+        let d = resolved_to_event(
+            "0123456789abcdef._lanpilot._udp.local.",
+            &map,
+            vec![a, b],
+            45810,
+        )
+        .unwrap();
+        assert_eq!(d.short_id, "0123456789abcdef");
+        assert_eq!(d.addrs, vec![b, a]);
+        assert_eq!(d.port, 45810);
+    }
+
+    #[test]
+    fn inverted_proto_range_is_rejected() {
+        let mut map: HashMap<String, String> = ad().txt().into_iter().collect();
+        map.insert("proto".into(), "3-2".into());
+        assert!(parse_txt(&map).is_none());
+    }
+
+    #[test]
+    fn name_is_sanitized() {
+        let mut map: HashMap<String, String> = ad().txt().into_iter().collect();
+        map.insert("name".into(), format!("a\u{0}b\nc{}", "x".repeat(100)));
+        let name = parse_txt(&map).unwrap().1;
+        assert!(name.starts_with("abcx"));
+        assert_eq!(name.chars().count(), 64);
+        assert!(!name.chars().any(char::is_control));
     }
 
     #[test]
