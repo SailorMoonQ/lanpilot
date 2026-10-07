@@ -10,6 +10,7 @@ use crate::proto::v1::{
     Os, PairChallenge, PairConfirm, PairRejectReason, PairRequest, PairResult, PairServerMessage,
     PasswordPairing, QrPairing, StreamOpen, pair_request, pair_server_message, stream_open,
 };
+use crate::session::CLOSE_UNEXPECTED_PEER;
 use crate::text::sanitize_display_name;
 use crate::transport::{TransportError, connect, finish_and_confirm, peer_public_key};
 use std::net::SocketAddr;
@@ -265,7 +266,7 @@ pub async fn pair_with_invite(
 
     let server_key = peer_public_key(&conn)?;
     if server_key != invite.server_public_key {
-        conn.close(1u32.into(), b"server key mismatch");
+        conn.close(CLOSE_UNEXPECTED_PEER.into(), b"server key mismatch");
         return Err(PairingFlowError::ServerKeyMismatch);
     }
 

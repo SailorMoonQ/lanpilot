@@ -3,9 +3,12 @@ mod common;
 use lanpilot_core::identity::Identity;
 use lanpilot_core::proto::v1::{Hello, Os, PairRequest, StreamOpen, stream_open};
 use lanpilot_core::session::{
-    Opened, SessionError, accept_open, answer_hello, local_hello, open_session,
+    Opened, SessionError, accept_authorized, accept_open, answer_hello, connect_paired,
+    local_hello, open_session,
 };
+use lanpilot_core::transport::{client_endpoint, server_endpoint};
 use lanpilot_core::version::{PROTO_MAX, VersionMismatch};
+use std::time::Duration;
 
 #[tokio::test]
 async fn hello_exchange_negotiates_version() {
@@ -153,4 +156,112 @@ async fn empty_stream_open_is_rejected() {
         accept_open(&p.server).await,
         Err(SessionError::Unexpected(_))
     ));
+}
+
+fn pair_open(name: &str) -> StreamOpen {
+    StreamOpen {
+        kind: Some(stream_open::Kind::Pair(PairRequest {
+            device_name: name.into(),
+            ..Default::default()
+        })),
+    }
+}
+
+#[tokio::test]
+async fn unpaired_hello_is_rejected() {
+    let p = common::connected(&Identity::generate(), &Identity::generate()).await;
+    let server = tokio::spawn({
+        let conn = p.server.clone();
+        async move { accept_authorized(&conn, |_| false).await }
+    });
+
+    let hello = local_hello("iPhone", Os::Ios, "0.1.0", &[]);
+    let opened = tokio::time::timeout(Duration::from_secs(5), open_session(&p.client, &hello))
+        .await
+        .expect("client gave up within 5 s");
+    assert!(opened.is_err());
+    assert!(matches!(
+        server.await.unwrap(),
+        Err(SessionError::NotPaired)
+    ));
+    let reason = tokio::time::timeout(Duration::from_secs(5), p.client.closed())
+        .await
+        .expect("server closed the connection");
+    assert!(
+        matches!(&reason, lanpilot_core::quinn::ConnectionError::ApplicationClosed(c)
+            if c.error_code == lanpilot_core::session::CLOSE_NOT_PAIRED.into()),
+        "{reason:?}"
+    );
+}
+
+#[tokio::test]
+async fn paired_hello_is_accepted() {
+    let client_id = Identity::generate();
+    let client_key = client_id.public_key();
+    let p = common::connected(&Identity::generate(), &client_id).await;
+    let server = tokio::spawn({
+        let conn = p.server.clone();
+        async move {
+            let Opened::Session {
+                mut send, hello, ..
+            } = accept_authorized(&conn, |k| *k == client_key)
+                .await
+                .unwrap()
+            else {
+                panic!("expected a session");
+            };
+            let local = local_hello("Desk", Os::Linux, "0.1.0", &[]);
+            answer_hello(&mut send, &local, &hello).await.unwrap()
+        }
+    });
+
+    let hello = local_hello("iPhone", Os::Ios, "0.1.0", &[]);
+    let session = tokio::time::timeout(Duration::from_secs(5), open_session(&p.client, &hello))
+        .await
+        .expect("session opened within 5 s")
+        .unwrap();
+    assert_eq!(server.await.unwrap(), session.version);
+    assert_eq!(session.server_hello.device_name, "Desk");
+}
+
+#[tokio::test]
+async fn unpaired_pair_request_is_allowed() {
+    let p = common::connected(&Identity::generate(), &Identity::generate()).await;
+    let (mut send, _recv) = p.client.open_bi().await.unwrap();
+    lanpilot_core::framing::write_msg(&mut send, &pair_open("iPhone"))
+        .await
+        .unwrap();
+    match accept_authorized(&p.server, |_| false).await.unwrap() {
+        Opened::Pair { request, .. } => assert_eq!(request.device_name, "iPhone"),
+        Opened::Session { .. } => panic!("expected a pair request"),
+    }
+}
+
+#[tokio::test]
+async fn connect_paired_rejects_wrong_server_before_sending() {
+    let server_id = Identity::generate();
+    let server = server_endpoint(&server_id, "127.0.0.1:0".parse().unwrap()).unwrap();
+    let addr = server.local_addr().unwrap();
+    let accept = tokio::spawn({
+        let server = server.clone();
+        async move {
+            let conn = server.accept().await.unwrap().await.unwrap();
+            // The client must close before opening any stream.
+            conn.accept_bi().await.is_err()
+        }
+    });
+
+    let client = client_endpoint(&Identity::generate()).unwrap();
+    let wrong = Identity::generate().public_key();
+    let err = connect_paired(&client, addr, &wrong).await.unwrap_err();
+    assert!(matches!(err, SessionError::UnexpectedPeer), "{err:?}");
+    assert!(accept.await.unwrap(), "server must not receive a stream");
+
+    // The right key connects.
+    let accept = tokio::spawn(async move { server.accept().await.unwrap().await.unwrap() });
+    let conn = connect_paired(&client, addr, &server_id.public_key())
+        .await
+        .unwrap();
+    accept.await.unwrap();
+    conn.close(0u32.into(), b"done");
 }
