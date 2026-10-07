@@ -1,4 +1,10 @@
-//! mDNS advertisement (PC) and browsing (phone). See spec section 3.1.
+//! mDNS advertisement (PC) and browsing. See spec section 3.1.
+//!
+//! [`Browser`] does raw multicast and is meant for desktop and tests. iOS
+//! needs a restricted entitlement for raw multicast and Android needs a
+//! MulticastLock, so phones should browse via NWBrowser / NsdManager and call
+//! [`DiscoveredDevice::from_resolved`]; Found/Lost are hints, the only
+//! identity check is the TLS key.
 
 use crate::proto::v1::Os;
 use crate::text::sanitize_display_name;
@@ -126,29 +132,36 @@ fn short_id_from_fullname(fullname: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
-/// Builds a device from a resolved service, dropping it unless the TXT `id`
-/// equals the mDNS instance name (otherwise a LAN peer could claim any identity).
-fn resolved_to_event(
-    fullname: &str,
-    props: &HashMap<String, String>,
-    mut addrs: Vec<IpAddr>,
-    port: u16,
-) -> Option<DiscoveredDevice> {
-    let instance = short_id_from_fullname(fullname)?;
-    let (short_id, name, os, proto_min, proto_max) = parse_txt(props)?;
-    if short_id != instance {
-        return None;
+impl DiscoveredDevice {
+    /// Builds a device from a resolved service: `fullname` is the full service
+    /// name (`<short_id>._lanpilot._udp.local.`), `txt` its TXT properties.
+    /// Returns `None` unless the TXT is valid and its `id` equals the mDNS
+    /// instance name (otherwise a LAN peer could claim any identity). The name
+    /// is sanitized and `addrs` are sorted.
+    ///
+    /// Phones resolve with platform APIs and call this; [`Browser`] uses it too.
+    pub fn from_resolved(
+        fullname: &str,
+        txt: &HashMap<String, String>,
+        mut addrs: Vec<IpAddr>,
+        port: u16,
+    ) -> Option<DiscoveredDevice> {
+        let instance = short_id_from_fullname(fullname)?;
+        let (short_id, name, os, proto_min, proto_max) = parse_txt(txt)?;
+        if short_id != instance {
+            return None;
+        }
+        addrs.sort();
+        Some(DiscoveredDevice {
+            short_id,
+            name,
+            os,
+            proto_min,
+            proto_max,
+            addrs,
+            port,
+        })
     }
-    addrs.sort();
-    Some(DiscoveredDevice {
-        short_id,
-        name,
-        os,
-        proto_min,
-        proto_max,
-        addrs,
-        port,
-    })
 }
 
 pub struct Advertiser {
@@ -206,9 +219,12 @@ impl Browser {
                         .map(|p| (p.key().to_owned(), p.val_str().to_owned()))
                         .collect();
                     let addrs: Vec<IpAddr> = info.get_addresses().iter().copied().collect();
-                    if let Some(device) =
-                        resolved_to_event(info.get_fullname(), &props, addrs, info.get_port())
-                    {
+                    if let Some(device) = DiscoveredDevice::from_resolved(
+                        info.get_fullname(),
+                        &props,
+                        addrs,
+                        info.get_port(),
+                    ) {
                         return Some(DiscoveryEvent::Found(device));
                     }
                 }
@@ -276,9 +292,18 @@ mod tests {
     fn mismatched_instance_and_txt_id_is_dropped() {
         let map: HashMap<String, String> = ad().txt().into_iter().collect();
         assert!(
-            resolved_to_event("fedcba9876543210._lanpilot._udp.local.", &map, vec![], 1).is_none()
+            DiscoveredDevice::from_resolved(
+                "fedcba9876543210._lanpilot._udp.local.",
+                &map,
+                vec![],
+                1
+            )
+            .is_none()
         );
-        assert!(resolved_to_event("evil._lanpilot._udp.local.", &map, vec![], 1).is_none());
+        assert!(
+            DiscoveredDevice::from_resolved("evil._lanpilot._udp.local.", &map, vec![], 1)
+                .is_none()
+        );
     }
 
     #[test]
@@ -304,7 +329,7 @@ mod tests {
         let map: HashMap<String, String> = ad().txt().into_iter().collect();
         let a: IpAddr = "192.168.1.9".parse().unwrap();
         let b: IpAddr = "10.0.0.2".parse().unwrap();
-        let d = resolved_to_event(
+        let d = DiscoveredDevice::from_resolved(
             "0123456789abcdef._lanpilot._udp.local.",
             &map,
             vec![a, b],
