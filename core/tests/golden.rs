@@ -1,18 +1,33 @@
 //! Protocol compatibility. Every released protocol version keeps its samples
 //! here forever; newer code must still decode them to the same values.
-//! Regenerate samples for the current version with `LANPILOT_BLESS=1`.
+//! Regenerate samples for the current version with `LANPILOT_BLESS=1` (exactly `1`).
 
 use lanpilot_core::proto::v1::*;
 use prost::Message;
+use std::ffi::OsStr;
 use std::path::PathBuf;
 
 fn golden_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/golden")
 }
 
+/// Samples are rewritten only when `LANPILOT_BLESS` is exactly `1`.
+fn should_bless(var: Option<&OsStr>) -> bool {
+    var == Some(OsStr::new("1"))
+}
+
+#[test]
+fn bless_needs_exactly_one() {
+    assert!(should_bless(Some(OsStr::new("1"))));
+    for other in ["0", "", "true", "yes"] {
+        assert!(!should_bless(Some(OsStr::new(other))), "{other:?}");
+    }
+    assert!(!should_bless(None));
+}
+
 fn check<M: Message + Default + PartialEq + std::fmt::Debug>(name: &str, expected: M) {
     let path = golden_dir().join(format!("{name}.bin"));
-    if std::env::var_os("LANPILOT_BLESS").is_some() {
+    if should_bless(std::env::var_os("LANPILOT_BLESS").as_deref()) {
         std::fs::create_dir_all(golden_dir()).unwrap();
         std::fs::write(&path, expected.encode_to_vec()).unwrap();
     }
