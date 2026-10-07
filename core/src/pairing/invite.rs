@@ -10,13 +10,26 @@ use std::net::IpAddr;
 
 const PREFIX: &str = "lanpilot://pair?d=";
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct Invite {
     pub addrs: Vec<IpAddr>,
     pub port: u16,
     pub server_public_key: PublicKey,
     pub token: [u8; 16],
     pub server_name: String,
+}
+
+/// The one-time token is a secret, so `Debug` never prints it.
+impl std::fmt::Debug for Invite {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Invite")
+            .field("addrs", &self.addrs)
+            .field("port", &self.port)
+            .field("server_public_key", &self.server_public_key)
+            .field("token", &"<redacted>")
+            .field("server_name", &self.server_name)
+            .finish()
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -102,6 +115,17 @@ mod tests {
             "no base64 padding"
         );
         assert_eq!(Invite::from_uri(&uri).unwrap(), sample());
+    }
+
+    #[test]
+    fn debug_redacts_token() {
+        let mut invite = sample();
+        invite.token = [0x5a; 16];
+        let dbg = format!("{invite:?}");
+        assert!(!dbg.contains(&hex::encode(invite.token)), "{dbg}");
+        assert!(!dbg.contains(&format!("{:?}", invite.token)), "{dbg}");
+        assert!(dbg.contains("<redacted>"), "{dbg}");
+        assert!(dbg.contains("10.0.0.5"), "{dbg}");
     }
 
     #[test]

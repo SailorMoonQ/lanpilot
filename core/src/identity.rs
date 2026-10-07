@@ -14,8 +14,15 @@ pub enum IdentityError {
     Certificate(String),
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PublicKey(pub [u8; 32]);
+
+/// Prints `PublicKey(<short_id>)`, which is what users see and compare.
+impl std::fmt::Debug for PublicKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "PublicKey({})", self.short_id())
+    }
+}
 
 impl PublicKey {
     pub fn from_slice(bytes: &[u8]) -> Result<Self, IdentityError> {
@@ -156,6 +163,12 @@ mod tests {
     fn from_slice_checks_length() {
         assert!(PublicKey::from_slice(&[0u8; 31]).is_err());
         assert!(PublicKey::from_slice(&[0u8; 32]).is_ok());
+    }
+
+    #[test]
+    fn public_key_debug_shows_short_id() {
+        let pk = rfc_identity().public_key();
+        assert_eq!(format!("{pk:?}"), format!("PublicKey({})", pk.short_id()));
     }
 
     #[test]

@@ -6,9 +6,18 @@ use std::time::{Duration, Instant};
 
 pub const TOKEN_TTL: Duration = Duration::from_secs(120);
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct TokenStore {
     expiry_by_token: HashMap<[u8; 16], Instant>,
+}
+
+/// Tokens are secrets, so `Debug` shows only how many are outstanding.
+impl std::fmt::Debug for TokenStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TokenStore")
+            .field("count", &self.expiry_by_token.len())
+            .finish()
+    }
 }
 
 impl TokenStore {
@@ -79,6 +88,15 @@ mod tests {
         let now = Instant::now();
         let mut store = TokenStore::new();
         assert_ne!(store.issue(now), store.issue(now));
+    }
+
+    #[test]
+    fn debug_shows_only_count() {
+        let mut store = TokenStore::new();
+        let t = store.issue(Instant::now());
+        let dbg = format!("{store:?}");
+        assert_eq!(dbg, "TokenStore { count: 1 }");
+        assert!(!dbg.contains(&hex::encode(t)));
     }
 
     #[test]
