@@ -6,6 +6,7 @@ pub mod identity;
 pub mod pairing;
 pub mod pointer;
 pub mod proto;
+pub mod session;
 pub mod tls;
 pub mod transport;
 pub mod version;
