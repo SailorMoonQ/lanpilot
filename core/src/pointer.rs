@@ -2,6 +2,10 @@
 
 use crate::proto::v1::GestureState;
 
+/// Maximum absolute value of any cumulative total accepted from the wire.
+/// Larger values indicate corruption or attack and are rejected.
+pub const MAX_TOTAL: f32 = 1.0e7;
+
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct PointerDelta {
     pub dx: i32,
@@ -36,7 +40,29 @@ impl PointerApplier {
         Self::default()
     }
 
+    /// Apply a received gesture state sample, emitting the accumulated motion since the last
+    /// applied sample of this gesture.
+    ///
+    /// `None` means the sample is stale or invalid and must be ignored. Stale samples are
+    /// from an older gesture, or have a sequence number not strictly increasing within the
+    /// current gesture. Invalid samples have non-finite or out-of-range totals.
+    ///
+    /// The applier is per connection, because gesture IDs restart on reconnect.
     pub fn apply(&mut self, state: &GestureState) -> Option<PointerDelta> {
+        // Validate totals before any state change. NaN, infinity, and out-of-range
+        // values are rejected to prevent cursor jumps, scroll poisoning, and overflow.
+        if !state.total_dx.is_finite()
+            || !state.total_dy.is_finite()
+            || !state.total_scroll_x.is_finite()
+            || !state.total_scroll_y.is_finite()
+            || state.total_dx.abs() > MAX_TOTAL
+            || state.total_dy.abs() > MAX_TOTAL
+            || state.total_scroll_x.abs() > MAX_TOTAL
+            || state.total_scroll_y.abs() > MAX_TOTAL
+        {
+            return None;
+        }
+
         let is_new = match &self.current {
             Some(c) if state.gesture_id < c.gesture_id => return None,
             Some(c) if state.gesture_id == c.gesture_id => {
@@ -63,8 +89,20 @@ impl PointerApplier {
         let target_x = f64::from(state.total_dx).floor() as i64;
         let target_y = f64::from(state.total_dy).floor() as i64;
         let delta = PointerDelta {
-            dx: (target_x - c.emitted_x) as i32,
-            dy: (target_y - c.emitted_y) as i32,
+            dx: i32::try_from(target_x - c.emitted_x).unwrap_or_else(|_| {
+                if target_x - c.emitted_x < 0 {
+                    i32::MIN
+                } else {
+                    i32::MAX
+                }
+            }),
+            dy: i32::try_from(target_y - c.emitted_y).unwrap_or_else(|_| {
+                if target_y - c.emitted_y < 0 {
+                    i32::MIN
+                } else {
+                    i32::MAX
+                }
+            }),
             scroll_x: state.total_scroll_x - c.scroll_x,
             scroll_y: state.total_scroll_y - c.scroll_y,
         };
@@ -153,6 +191,54 @@ mod tests {
         s.seq = 2;
         s.total_scroll_y = 2.0;
         assert_eq!(a.apply(&s).unwrap().scroll_y, 0.5);
+    }
+
+    #[test]
+    fn nan_or_infinite_sample_is_rejected_without_state_change() {
+        let mut a = PointerApplier::new();
+        let valid = gs(1, 1, 3.0, 4.0);
+        let d1 = a.apply(&valid).unwrap();
+        assert_eq!((d1.dx, d1.dy), (3, 4));
+
+        // NaN total_dx with higher seq
+        let nan_dx = gs(1, 2, f32::NAN, 0.0);
+        assert_eq!(a.apply(&nan_dx), None);
+
+        // NaN total_scroll_y with higher seq
+        let mut nan_scroll = gs(1, 3, 0.0, 0.0);
+        nan_scroll.total_scroll_y = f32::NAN;
+        assert_eq!(a.apply(&nan_scroll), None);
+
+        // +inf total_dy with higher seq
+        let inf_dy = gs(1, 4, 0.0, f32::INFINITY);
+        assert_eq!(a.apply(&inf_dy), None);
+
+        // Verify state was not changed: a valid sample at seq 5 should emit
+        // relative to the first valid sample at seq 1
+        let d2 = a.apply(&gs(1, 5, 6.0, 8.0)).unwrap();
+        assert_eq!((d2.dx, d2.dy), (3, 4));
+    }
+
+    #[test]
+    fn out_of_range_total_is_rejected() {
+        let mut a = PointerApplier::new();
+        let out_of_range = gs(1, 1, 2.0e7, 0.0);
+        assert_eq!(a.apply(&out_of_range), None);
+    }
+
+    #[test]
+    fn new_gesture_accepts_seq_zero() {
+        let mut a = PointerApplier::new();
+        // A new gesture can have seq 0 (e.g., a tap with no motion)
+        let d1 = a.apply(&gs(1, 0, 3.0, 0.0)).unwrap();
+        assert_eq!(d1.dx, 3);
+
+        // Same gesture, same seq is stale
+        assert_eq!(a.apply(&gs(1, 0, 3.0, 0.0)), None);
+
+        // Higher seq in same gesture is accepted
+        let d2 = a.apply(&gs(1, 1, 5.0, 0.0)).unwrap();
+        assert_eq!(d2.dx, 2);
     }
 
     /// Tiny deterministic RNG so the property test controls loss and order.
