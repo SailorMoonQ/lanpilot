@@ -18,9 +18,11 @@ rcgen = "0.13"
 x509-parser = "0.16"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging"] }
 thiserror = "2"
+tokio = { version = "1", features = ["io-util", "rt", "macros", "net", "time", "sync"] }
 
 [build-dependencies]
 prost-build = "0.13"
 protox = "0.7"
 
 [dev-dependencies]
+tokio = { version = "1", features = ["full"] }
