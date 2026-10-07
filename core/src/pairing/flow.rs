@@ -74,6 +74,11 @@ fn finish(send: &mut quinn::SendStream) -> Result<(), PairingFlowError> {
     send.finish().map_err(|_| PairingFlowError::Closed)
 }
 
+/// Whole seconds, rounded up, so a client never retries before the lock ends.
+fn ceil_secs(d: Duration) -> u64 {
+    d.as_secs() + u64::from(d.subsec_nanos() > 0)
+}
+
 /// Rejection to send: reason plus optional retry delay.
 type Reject = (PairRejectReason, Duration);
 
@@ -144,7 +149,7 @@ pub async fn serve_pairing<A: PairingAuthority>(
             reason: reason as i32,
             server_name: String::new(),
             server_os: Os::Unspecified as i32,
-            retry_after_secs: u32::try_from(retry.as_secs()).unwrap_or(u32::MAX),
+            retry_after_secs: u32::try_from(ceil_secs(retry)).unwrap_or(u32::MAX),
         },
     };
     let accepted = result.accepted;
@@ -347,6 +352,15 @@ async fn password_exchange(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retry_after_rounds_up_to_whole_seconds() {
+        assert_eq!(ceil_secs(Duration::ZERO), 0);
+        assert_eq!(ceil_secs(Duration::from_millis(1)), 1);
+        assert_eq!(ceil_secs(Duration::from_millis(119_001)), 120);
+        assert_eq!(ceil_secs(Duration::from_secs(120)), 120);
+        assert_eq!(ceil_secs(Duration::new(5, 1)), 6);
+    }
 
     #[test]
     fn server_name_from_result_is_sanitized() {
