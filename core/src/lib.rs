@@ -3,6 +3,7 @@
 pub use quinn;
 pub mod framing;
 pub mod identity;
+pub mod pairing;
 pub mod pointer;
 pub mod proto;
 pub mod tls;
