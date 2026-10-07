@@ -74,7 +74,14 @@ async fn streams_and_datagrams_work() {
 
 /// UDP relay between client and server that can be cut, simulating the phone
 /// dropping off Wi-Fi without closing the connection.
-async fn cuttable_relay(server: SocketAddr) -> (SocketAddr, Arc<AtomicBool>) {
+/// Returns the relay address, the cut switch and the relay tasks (abort them when done).
+async fn cuttable_relay(
+    server: SocketAddr,
+) -> (
+    SocketAddr,
+    Arc<AtomicBool>,
+    [tokio::task::JoinHandle<()>; 2],
+) {
     let front = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
     let back = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
     back.connect(server).await.unwrap();
@@ -82,39 +89,44 @@ async fn cuttable_relay(server: SocketAddr) -> (SocketAddr, Arc<AtomicBool>) {
     let cut = Arc::new(AtomicBool::new(false));
     let client: Arc<Mutex<Option<SocketAddr>>> = Arc::new(Mutex::new(None));
 
-    {
+    let forward = {
         let (front, back, cut, client) = (front.clone(), back.clone(), cut.clone(), client.clone());
         tokio::spawn(async move {
             let mut buf = vec![0u8; 65536];
             loop {
-                let (n, from) = front.recv_from(&mut buf).await.unwrap();
+                // Windows reports ICMP port-unreachable as a recv error; keep relaying.
+                let Ok((n, from)) = front.recv_from(&mut buf).await else {
+                    continue;
+                };
                 *client.lock().unwrap() = Some(from);
                 if !cut.load(Ordering::SeqCst) {
                     let _ = back.send(&buf[..n]).await;
                 }
             }
-        });
-    }
-    {
+        })
+    };
+    let backward = {
         let cut = cut.clone();
         tokio::spawn(async move {
             let mut buf = vec![0u8; 65536];
             loop {
-                let n = back.recv(&mut buf).await.unwrap();
+                let Ok(n) = back.recv(&mut buf).await else {
+                    continue;
+                };
                 let to = *client.lock().unwrap();
                 if let (false, Some(to)) = (cut.load(Ordering::SeqCst), to) {
                     let _ = front.send_to(&buf[..n], to).await;
                 }
             }
-        });
-    }
-    (front_addr, cut)
+        })
+    };
+    (front_addr, cut, [forward, backward])
 }
 
 #[tokio::test]
 async fn vanished_peer_is_detected_within_idle_timeout() {
     let server = server_endpoint(&Identity::generate(), localhost()).unwrap();
-    let (relay_addr, cut) = cuttable_relay(server.local_addr().unwrap()).await;
+    let (relay_addr, cut, relay_tasks) = cuttable_relay(server.local_addr().unwrap()).await;
     let client = client_endpoint(&Identity::generate()).unwrap();
 
     let server_task = tokio::spawn(async move {
@@ -139,4 +151,7 @@ async fn vanished_peer_is_detected_within_idle_timeout() {
         .unwrap();
     let elapsed = closed_at - cut_at;
     assert!(elapsed < Duration::from_secs(5), "took {elapsed:?}");
+    for task in relay_tasks {
+        task.abort();
+    }
 }
