@@ -35,12 +35,17 @@ where
     M: prost::Message + Default,
     R: AsyncRead + Unpin,
 {
-    let mut len_buf = [0u8; 4];
-    match r.read_exact(&mut len_buf).await {
+    let mut first_byte = [0u8; 1];
+    match r.read_exact(&mut first_byte).await {
         Ok(_) => {}
         Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
         Err(e) => return Err(e.into()),
     }
+    let mut rest_bytes = [0u8; 3];
+    r.read_exact(&mut rest_bytes).await?;
+    let mut len_buf = [0u8; 4];
+    len_buf[0] = first_byte[0];
+    len_buf[1..].copy_from_slice(&rest_bytes);
     let len = u32::from_be_bytes(len_buf) as usize;
     if len > MAX_FRAME {
         return Err(FrameError::TooLarge(len));
@@ -101,6 +106,18 @@ mod tests {
         let (mut a, mut b) = tokio::io::duplex(16);
         use tokio::io::AsyncWriteExt;
         a.write_all(&10u32.to_be_bytes()).await.unwrap();
+        a.write_all(&[1, 2]).await.unwrap();
+        drop(a);
+        assert!(matches!(
+            read_msg::<Hello, _>(&mut b).await,
+            Err(FrameError::Io(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn truncated_length_prefix_is_an_error() {
+        let (mut a, mut b) = tokio::io::duplex(16);
+        use tokio::io::AsyncWriteExt;
         a.write_all(&[1, 2]).await.unwrap();
         drop(a);
         assert!(matches!(
