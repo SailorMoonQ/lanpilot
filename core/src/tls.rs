@@ -126,6 +126,8 @@ pub fn server_config(identity: &Identity, alpn: &[u8]) -> Result<rustls::ServerC
         .with_client_cert_verifier(SelfSignedEd25519::new(&provider))
         .with_single_cert(vec![cert], key)?;
     config.alpn_protocols = vec![alpn.to_vec()];
+    // Spec 3.2: 0-RTT is disabled so shortcut commands cannot be replayed.
+    config.max_early_data_size = 0;
     Ok(config)
 }
 
@@ -138,5 +140,19 @@ pub fn client_config(identity: &Identity, alpn: &[u8]) -> Result<rustls::ClientC
         .with_custom_certificate_verifier(SelfSignedEd25519::new(&provider))
         .with_client_auth_cert(vec![cert], key)?;
     config.alpn_protocols = vec![alpn.to_vec()];
+    // Spec 3.2: 0-RTT is disabled so shortcut commands cannot be replayed.
+    config.enable_early_data = false;
     Ok(config)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn zero_rtt_is_disabled() {
+        let id = Identity::generate();
+        assert_eq!(server_config(&id, b"x").unwrap().max_early_data_size, 0);
+        assert!(!client_config(&id, b"x").unwrap().enable_early_data);
+    }
 }
