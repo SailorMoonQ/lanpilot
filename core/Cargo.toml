@@ -22,6 +22,8 @@ quinn = { version = "0.11", default-features = false, features = ["runtime-tokio
 thiserror = "2"
 spake2 = "0.4"
 hmac = "0.12"
+unicode-normalization = "0.1"
+zeroize = "1"
 tokio = { version = "1", features = ["io-util", "rt", "macros", "net", "time", "sync"] }
 
 [build-dependencies]

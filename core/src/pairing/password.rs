@@ -5,6 +5,8 @@ use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use spake2::{Ed25519Group, Identity as SpakeIdentity, Password, Spake2};
 use std::time::{Duration, Instant};
+use unicode_normalization::UnicodeNormalization;
+use zeroize::Zeroizing;
 
 pub const MIN_PASSWORD_CHARS: usize = 6;
 pub const MAX_FAILURES: u32 = 5;
@@ -22,14 +24,14 @@ pub enum PasswordError {
 }
 
 pub fn validate_password(password: &str) -> Result<(), PasswordError> {
-    if password.chars().count() < MIN_PASSWORD_CHARS {
+    if password.nfc().count() < MIN_PASSWORD_CHARS {
         Err(PasswordError::TooShort)
     } else {
         Ok(())
     }
 }
 
-pub struct SharedKey(Vec<u8>);
+pub struct SharedKey(Zeroizing<Vec<u8>>);
 
 impl std::fmt::Debug for SharedKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -38,7 +40,8 @@ impl std::fmt::Debug for SharedKey {
 }
 
 fn start(password: &str, a: bool) -> (Spake2<Ed25519Group>, Vec<u8>) {
-    let pw = Password::new(password.as_bytes());
+    let normalized = Zeroizing::new(password.nfc().collect::<String>());
+    let pw = Password::new(normalized.as_bytes());
     let (ida, idb) = (SpakeIdentity::new(ID_CLIENT), SpakeIdentity::new(ID_SERVER));
     if a {
         Spake2::<Ed25519Group>::start_a(&pw, &ida, &idb)
@@ -60,7 +63,7 @@ impl ClientHandshake {
     pub fn finish(self, server_msg: &[u8]) -> Result<SharedKey, PasswordError> {
         self.state
             .finish(server_msg)
-            .map(SharedKey)
+            .map(|key| SharedKey(Zeroizing::new(key)))
             .map_err(|_| PasswordError::Protocol)
     }
 }
@@ -73,7 +76,7 @@ pub fn server_handshake(
     let key = state
         .finish(client_msg)
         .map_err(|_| PasswordError::Protocol)?;
-    Ok((msg, SharedKey(key)))
+    Ok((msg, SharedKey(Zeroizing::new(key))))
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -115,6 +118,9 @@ pub fn verify_confirmation(
     mac(key, role, client, server).verify_slice(tag).is_ok()
 }
 
+/// Online-guess limiter. Callers hold one shared instance for the whole server
+/// under one lock, call `begin` before sending any SPAKE2 message, and call
+/// `record_success` only after the client's confirmation verifies.
 #[derive(Debug, Default)]
 pub struct PasswordAttempts {
     failures: u32,
@@ -126,22 +132,23 @@ impl PasswordAttempts {
         Self::default()
     }
 
-    pub fn check(&self, now: Instant) -> Result<(), Duration> {
+    /// Reserves one attempt. If locked, returns the time left without counting.
+    /// Otherwise the attempt is counted as a failure immediately and `Ok` is
+    /// returned; only `record_success` undoes it.
+    pub fn begin(&mut self, now: Instant) -> Result<(), Duration> {
         match self.locked_until {
-            Some(until) if now < until => Err(until - now),
-            _ => Ok(()),
-        }
-    }
-
-    pub fn record_failure(&mut self, now: Instant) {
-        if self.locked_until.is_some_and(|until| now >= until) {
-            self.locked_until = None;
-            self.failures = 0;
+            Some(until) if now < until => return Err(until - now),
+            Some(_) => {
+                self.locked_until = None;
+                self.failures = 0;
+            }
+            None => {}
         }
         self.failures += 1;
         if self.failures >= MAX_FAILURES {
             self.locked_until = Some(now + LOCKOUT);
         }
+        Ok(())
     }
 
     pub fn record_success(&mut self) {
@@ -215,28 +222,74 @@ mod tests {
     }
 
     #[test]
-    fn locks_after_max_failures_and_unlocks_later() {
+    fn begin_counts_attempts_without_outcome() {
         let t0 = Instant::now();
         let mut a = PasswordAttempts::new();
-        for _ in 0..MAX_FAILURES - 1 {
-            a.record_failure(t0);
-            assert!(a.check(t0).is_ok());
+        for _ in 0..MAX_FAILURES {
+            assert!(a.begin(t0).is_ok());
         }
-        a.record_failure(t0);
-        let left = a.check(t0).unwrap_err();
-        assert_eq!(left, LOCKOUT);
-        assert!(a.check(t0 + LOCKOUT).is_ok());
+        assert_eq!(a.begin(t0).unwrap_err(), LOCKOUT);
     }
 
     #[test]
-    fn success_resets_failures() {
+    fn locks_after_max_attempts_and_unlocks_later() {
+        let t0 = Instant::now();
+        let mut a = PasswordAttempts::new();
+        for _ in 0..MAX_FAILURES {
+            a.begin(t0).unwrap();
+        }
+        assert_eq!(a.begin(t0).unwrap_err(), LOCKOUT);
+        assert!(a.begin(t0 + LOCKOUT).is_ok());
+    }
+
+    #[test]
+    fn single_failure_after_expiry_does_not_relock() {
+        let t0 = Instant::now();
+        let mut a = PasswordAttempts::new();
+        for _ in 0..MAX_FAILURES {
+            a.begin(t0).unwrap();
+        }
+        let t1 = t0 + LOCKOUT;
+        assert!(a.begin(t1).is_ok());
+        assert!(a.begin(t1).is_ok());
+    }
+
+    #[test]
+    fn success_clears_reserved_attempts() {
         let t0 = Instant::now();
         let mut a = PasswordAttempts::new();
         for _ in 0..MAX_FAILURES - 1 {
-            a.record_failure(t0);
+            a.begin(t0).unwrap();
         }
         a.record_success();
-        a.record_failure(t0);
-        assert!(a.check(t0).is_ok());
+        for _ in 0..MAX_FAILURES {
+            assert!(a.begin(t0).is_ok());
+        }
+    }
+
+    #[test]
+    fn nfc_and_nfd_forms_agree() {
+        let (ck, sk) = run("caf\u{e9}12", "cafe\u{301}12");
+        let tag = confirmation(&sk, Role::Server, &C, &S);
+        assert!(verify_confirmation(&ck, Role::Server, &C, &S, &tag));
+        assert!(validate_password("cafe\u{301}12").is_ok());
+        assert!(validate_password("cafe\u{301}1").is_err());
+    }
+
+    #[test]
+    fn truncated_tag_is_rejected() {
+        let (ck, sk) = run("hunter22", "hunter22");
+        let tag = confirmation(&sk, Role::Server, &C, &S);
+        assert!(!verify_confirmation(&ck, Role::Server, &C, &S, &tag[..16]));
+        assert!(!verify_confirmation(&ck, Role::Server, &C, &S, &[]));
+    }
+
+    #[test]
+    fn client_finish_rejects_garbage() {
+        let (client, _) = ClientHandshake::start("hunter22");
+        assert!(matches!(
+            client.finish(&[1, 2, 3]),
+            Err(PasswordError::Protocol)
+        ));
     }
 }
