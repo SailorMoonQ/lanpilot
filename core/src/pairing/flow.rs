@@ -1,7 +1,7 @@
 //! Pairing over a QUIC connection. See spec sections 4.2 and 4.3.
 
 use crate::framing::{FrameError, read_msg, write_msg};
-use crate::identity::PublicKey;
+use crate::identity::{Identity, PublicKey};
 use crate::pairing::invite::Invite;
 use crate::pairing::password::{
     ClientHandshake, Reserved, Role, confirmation, server_handshake, verify_confirmation,
@@ -291,18 +291,21 @@ pub async fn pair_with_invite(
     into_paired(result?, server_key)
 }
 
+/// Pairs with the server at `addr` using the password. `identity` must be the
+/// one `endpoint` presents in TLS: its key is bound into the key confirmation.
 pub async fn pair_with_password(
     endpoint: &quinn::Endpoint,
     addr: SocketAddr,
-    client_key: &PublicKey,
+    identity: &Identity,
     password: &str,
     device_name: &str,
     os: Os,
 ) -> Result<PairedServer, PairingFlowError> {
+    let client_key = identity.public_key();
     let conn = connect(endpoint, addr).await?;
     let server_key = peer_public_key(&conn)?;
     let outcome =
-        password_exchange(&conn, client_key, &server_key, password, device_name, os).await;
+        password_exchange(&conn, &client_key, &server_key, password, device_name, os).await;
     conn.close(0u32.into(), b"done");
     into_paired(outcome?, server_key)
 }

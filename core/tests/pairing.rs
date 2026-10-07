@@ -231,16 +231,9 @@ async fn password_pairing_succeeds() {
 
     let client_id = Identity::generate();
     let client = client_endpoint(&client_id).unwrap();
-    let paired = pair_with_password(
-        &client,
-        s.addr,
-        &client_id.public_key(),
-        "hunter22",
-        "iPhone",
-        Os::Ios,
-    )
-    .await
-    .unwrap();
+    let paired = pair_with_password(&client, s.addr, &client_id, "hunter22", "iPhone", Os::Ios)
+        .await
+        .unwrap();
 
     assert_eq!(paired.public_key, s.id.public_key());
     let device = task.await.unwrap().unwrap().unwrap();
@@ -256,16 +249,9 @@ async fn wrong_password_fails_and_eventually_locks() {
 
     for _ in 0..MAX_FAILURES {
         let task = serve_one(&s, auth.clone());
-        let err = pair_with_password(
-            &client,
-            s.addr,
-            &client_id.public_key(),
-            "wrong-pw",
-            "iPhone",
-            Os::Ios,
-        )
-        .await
-        .unwrap_err();
+        let err = pair_with_password(&client, s.addr, &client_id, "wrong-pw", "iPhone", Os::Ios)
+            .await
+            .unwrap_err();
         assert!(matches!(err, PairingFlowError::WrongPassword), "{err:?}");
         // The client hangs up instead of confirming; the server sees an error,
         // and the attempt was counted when it began.
@@ -274,16 +260,9 @@ async fn wrong_password_fails_and_eventually_locks() {
 
     // Locked now, even with the right password.
     let task = serve_one(&s, auth.clone());
-    let err = pair_with_password(
-        &client,
-        s.addr,
-        &client_id.public_key(),
-        "hunter22",
-        "iPhone",
-        Os::Ios,
-    )
-    .await
-    .unwrap_err();
+    let err = pair_with_password(&client, s.addr, &client_id, "hunter22", "iPhone", Os::Ios)
+        .await
+        .unwrap_err();
     match err {
         PairingFlowError::Rejected {
             reason,
@@ -305,16 +284,9 @@ async fn password_pairing_disabled() {
     let task = serve_one(&s, auth.clone());
     let client_id = Identity::generate();
     let client = client_endpoint(&client_id).unwrap();
-    let err = pair_with_password(
-        &client,
-        s.addr,
-        &client_id.public_key(),
-        "hunter22",
-        "iPhone",
-        Os::Ios,
-    )
-    .await
-    .unwrap_err();
+    let err = pair_with_password(&client, s.addr, &client_id, "hunter22", "iPhone", Os::Ios)
+        .await
+        .unwrap_err();
     assert!(matches!(
         err,
         PairingFlowError::Rejected {
@@ -358,15 +330,7 @@ async fn parallel_password_attempts_cannot_exceed_limit() {
         clients.push(tokio::spawn(async move {
             let id = Identity::generate();
             let client = client_endpoint(&id).unwrap();
-            pair_with_password(
-                &client,
-                addr,
-                &id.public_key(),
-                "wrong-pw",
-                "iPhone",
-                Os::Ios,
-            )
-            .await
+            pair_with_password(&client, addr, &id, "wrong-pw", "iPhone", Os::Ios).await
         }));
     }
 
