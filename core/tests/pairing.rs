@@ -1,15 +1,19 @@
+use lanpilot_core::framing::{read_msg, write_msg};
 use lanpilot_core::identity::{Identity, PublicKey};
 use lanpilot_core::pairing::flow::{
     NewDevice, PairingAuthority, PairingFlowError, pair_with_invite, pair_with_password,
     serve_pairing,
 };
 use lanpilot_core::pairing::invite::Invite;
-use lanpilot_core::pairing::password::{MAX_FAILURES, PasswordAttempts};
+use lanpilot_core::pairing::password::{ClientHandshake, MAX_FAILURES, PasswordAttempts};
 use lanpilot_core::pairing::tokens::TokenStore;
-use lanpilot_core::proto::v1::{Os, PairRejectReason};
+use lanpilot_core::proto::v1::{
+    Os, PairConfirm, PairRejectReason, PairRequest, PairResult, PairServerMessage, PasswordPairing,
+    StreamOpen, pair_request, pair_server_message, stream_open,
+};
 use lanpilot_core::quinn;
 use lanpilot_core::session::{Opened, accept_open};
-use lanpilot_core::transport::{client_endpoint, server_endpoint};
+use lanpilot_core::transport::{client_endpoint, connect, server_endpoint};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -385,5 +389,68 @@ async fn parallel_password_attempts_cannot_exceed_limit() {
         "{wrong} wrong-password results"
     );
     assert_eq!(wrong + locked, total);
+    assert!(auth.approved.lock().unwrap().is_empty());
+}
+
+/// A client that runs SPAKE2 with `password`, ignores the server's
+/// confirmation and sends a garbage `PairConfirm` (or none, if the server
+/// answers the request with a result right away). Returns the final result.
+async fn malicious_password_client(addr: SocketAddr, password: &str) -> PairResult {
+    let client = client_endpoint(&Identity::generate()).unwrap();
+    let conn = connect(&client, addr).await.unwrap();
+    let (mut send, mut recv) = conn.open_bi().await.unwrap();
+    let (_handshake, spake_msg) = ClientHandshake::start(password);
+    let open = StreamOpen {
+        kind: Some(stream_open::Kind::Pair(PairRequest {
+            device_name: "Mallory".into(),
+            os: Os::Android as i32,
+            method: Some(pair_request::Method::Password(PasswordPairing {
+                spake_msg,
+            })),
+        })),
+    };
+    write_msg(&mut send, &open).await.unwrap();
+
+    let first: PairServerMessage = read_msg(&mut recv).await.unwrap().unwrap();
+    let result = match first.body {
+        Some(pair_server_message::Body::Result(r)) => r,
+        Some(pair_server_message::Body::Challenge(_)) => {
+            let garbage = PairConfirm {
+                client_confirm: vec![0xAA; 32],
+            };
+            write_msg(&mut send, &garbage).await.unwrap();
+            send.finish().unwrap();
+            let msg: PairServerMessage = read_msg(&mut recv).await.unwrap().unwrap();
+            match msg.body {
+                Some(pair_server_message::Body::Result(r)) => r,
+                other => panic!("expected a result, got {other:?}"),
+            }
+        }
+        None => panic!("empty PairServerMessage"),
+    };
+    conn.close(0u32.into(), b"done");
+    result
+}
+
+#[tokio::test]
+async fn garbage_confirmation_is_rejected_and_counted() {
+    let s = server();
+    let auth = TestAuthority::new(Some("hunter22"), true);
+
+    for _ in 0..MAX_FAILURES {
+        let task = serve_one(&s, auth.clone());
+        let result = malicious_password_client(s.addr, "wrong-pw").await;
+        assert!(!result.accepted);
+        assert_eq!(result.reason, PairRejectReason::BadPassword as i32);
+        assert!(task.await.unwrap().unwrap().is_none());
+    }
+
+    // Every garbage confirmation counted: now locked, even with the right password.
+    let task = serve_one(&s, auth.clone());
+    let result = malicious_password_client(s.addr, "hunter22").await;
+    assert!(!result.accepted);
+    assert_eq!(result.reason, PairRejectReason::Locked as i32);
+    assert!(result.retry_after_secs > 0);
+    assert!(task.await.unwrap().unwrap().is_none());
     assert!(auth.approved.lock().unwrap().is_empty());
 }
