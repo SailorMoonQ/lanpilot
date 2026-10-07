@@ -79,7 +79,8 @@ fn server() -> Server {
     Server { id, endpoint, addr }
 }
 
-/// Accepts one pairing connection and serves it.
+/// Accepts one pairing connection and serves it, then drops the connection at
+/// once (like a real server handler would), with no grace period for the client.
 fn serve_one(
     s: &Server,
     auth: Arc<TestAuthority>,
@@ -97,7 +98,7 @@ fn serve_one(
             panic!("expected pairing");
         };
         let result = serve_pairing(&conn, &key, send, recv, request, auth.as_ref()).await;
-        let _ = tokio::time::timeout(Duration::from_secs(5), conn.closed()).await;
+        drop(conn);
         result
     })
 }
@@ -132,6 +133,22 @@ async fn qr_pairing_succeeds() {
     assert_eq!(device.public_key, client_id.public_key());
     assert_eq!(device.os, Os::Ios);
     assert_eq!(*auth.approved.lock().unwrap(), vec!["iPhone".to_owned()]);
+}
+
+#[tokio::test]
+async fn accepted_result_survives_immediate_connection_drop() {
+    // Regression: the server handler drops the connection right after
+    // `serve_pairing` returns. The client must still receive the PairResult.
+    for _ in 0..10 {
+        let s = server();
+        let auth = TestAuthority::new(None, true);
+        let invite = invite_for(&s, auth.issue_token(), s.id.public_key());
+        let task = serve_one(&s, auth.clone());
+        let client = client_endpoint(&Identity::generate()).unwrap();
+        let paired = pair_with_invite(&client, &invite, "iPhone", Os::Ios).await;
+        assert_eq!(paired.unwrap().name, "Desk");
+        assert!(task.await.unwrap().unwrap().is_some());
+    }
 }
 
 #[tokio::test]

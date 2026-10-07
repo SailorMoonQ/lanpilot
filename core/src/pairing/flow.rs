@@ -10,7 +10,7 @@ use crate::proto::v1::{
     Os, PairChallenge, PairConfirm, PairRejectReason, PairRequest, PairResult, PairServerMessage,
     PasswordPairing, QrPairing, StreamOpen, pair_request, pair_server_message, stream_open,
 };
-use crate::transport::{TransportError, connect, peer_public_key};
+use crate::transport::{TransportError, connect, finish_and_confirm, peer_public_key};
 use std::net::SocketAddr;
 use std::time::Duration;
 
@@ -75,6 +75,18 @@ fn finish(send: &mut quinn::SendStream) -> Result<(), PairingFlowError> {
 /// Rejection to send: reason plus optional retry delay.
 type Reject = (PairRejectReason, Duration);
 
+/// Serves one pairing request received on `send`/`recv`.
+///
+/// Returns `Ok(Some(device))` when the device was approved and the accepted
+/// `PairResult` was delivered, `Ok(None)` when a rejection was delivered.
+///
+/// The result stream is finished and its delivery confirmed (bounded by
+/// [`DELIVERY_TIMEOUT`](crate::transport::DELIVERY_TIMEOUT)) before this
+/// returns, so the caller may drop the connection immediately afterwards.
+/// If delivery cannot be confirmed this returns `Err(PairingFlowError::Closed)`.
+///
+/// `approve()` runs before delivery; if delivery fails the caller should treat
+/// the pairing as uncertain and may remove the device.
 pub async fn serve_pairing<A: PairingAuthority>(
     conn: &quinn::Connection,
     server_key: &PublicKey,
@@ -141,7 +153,9 @@ pub async fn serve_pairing<A: PairingAuthority>(
         },
     )
     .await?;
-    finish(&mut send)?;
+    if !finish_and_confirm(&mut send).await {
+        return Err(PairingFlowError::Closed);
+    }
     Ok(accepted.then_some(device))
 }
 

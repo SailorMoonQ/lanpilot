@@ -4,6 +4,7 @@
 
 use crate::framing::{FrameError, read_msg, write_msg};
 use crate::proto::v1::{Hello, Os, PairRequest, StreamOpen, stream_open};
+use crate::transport::finish_and_confirm;
 use crate::version::{PROTO_MAX, PROTO_MIN, VersionMismatch, negotiate};
 
 #[derive(Debug, thiserror::Error)]
@@ -58,16 +59,30 @@ pub async fn accept_open(conn: &quinn::Connection) -> Result<Opened, SessionErro
     }
 }
 
+/// Sends the server Hello and negotiates the version with the client's Hello.
+///
+/// On a version mismatch the Hello is still sent (so the client can tell the
+/// user which side to update), then the stream is finished and its delivery
+/// awaited (bounded by [`DELIVERY_TIMEOUT`](crate::transport::DELIVERY_TIMEOUT))
+/// before `Err(SessionError::Version(..))` is returned, so the caller may drop
+/// the connection immediately.
 pub async fn answer_hello(
     send: &mut quinn::SendStream,
     local: &Hello,
     remote: &Hello,
 ) -> Result<u32, SessionError> {
     write_msg(send, local).await?;
-    Ok(negotiate(
+    match negotiate(
         (local.proto_min, local.proto_max),
         (remote.proto_min, remote.proto_max),
-    )?)
+    ) {
+        Ok(version) => Ok(version),
+        Err(mismatch) => {
+            // Best effort: the mismatch is the error worth reporting either way.
+            finish_and_confirm(send).await;
+            Err(mismatch.into())
+        }
+    }
 }
 
 pub struct ClientSession {

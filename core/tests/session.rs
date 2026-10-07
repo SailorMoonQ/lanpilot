@@ -42,40 +42,49 @@ async fn hello_exchange_negotiates_version() {
 
 #[tokio::test]
 async fn version_mismatch_is_reported_on_both_sides() {
-    let p = common::connected(&Identity::generate(), &Identity::generate()).await;
+    // The server handler drops its connection as soon as `answer_hello`
+    // returns; the client must still read the server Hello and report
+    // `PeerTooOld`, not a connection error.
+    for _ in 0..10 {
+        let common::Pair {
+            client,
+            server: server_conn,
+            client_endpoint: _client_endpoint,
+            server_endpoint: _server_endpoint,
+        } = common::connected(&Identity::generate(), &Identity::generate()).await;
 
-    let server = tokio::spawn({
-        let conn = p.server.clone();
-        async move {
+        let server = tokio::spawn(async move {
             let Opened::Session {
                 mut send, hello, ..
-            } = accept_open(&conn).await.unwrap()
+            } = accept_open(&server_conn).await.unwrap()
             else {
                 panic!("expected a session");
             };
             let local = local_hello("Desk", Os::Linux, "0.1.0", &[]);
             let result = answer_hello(&mut send, &local, &hello).await;
-            // Keep the stream open until the client has read our Hello.
-            conn.closed().await;
+            drop(server_conn);
             result
-        }
-    });
+        });
 
-    let future_client = Hello {
-        proto_min: 99,
-        proto_max: 99,
-        ..Default::default()
-    };
-    let client_result = open_session(&p.client, &future_client).await;
-    assert!(matches!(
-        client_result,
-        Err(SessionError::Version(VersionMismatch::PeerTooOld))
-    ));
-    p.client.close(0u32.into(), b"done");
-    assert!(matches!(
-        server.await.unwrap(),
-        Err(SessionError::Version(VersionMismatch::PeerTooNew))
-    ));
+        let future_client = Hello {
+            proto_min: 99,
+            proto_max: 99,
+            ..Default::default()
+        };
+        let client_result = open_session(&client, &future_client).await;
+        assert!(
+            matches!(
+                client_result,
+                Err(SessionError::Version(VersionMismatch::PeerTooOld))
+            ),
+            "{:?}",
+            client_result.err()
+        );
+        assert!(matches!(
+            server.await.unwrap(),
+            Err(SessionError::Version(VersionMismatch::PeerTooNew))
+        ));
+    }
 }
 
 #[tokio::test]

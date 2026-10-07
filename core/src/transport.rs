@@ -81,6 +81,27 @@ pub async fn connect(
     Ok(endpoint.connect(addr, SERVER_NAME)?.await?)
 }
 
+/// How long [`finish_and_confirm`] waits for the peer to acknowledge a stream.
+pub const DELIVERY_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Finishes `send` and waits (at most [`DELIVERY_TIMEOUT`]) until the peer has
+/// acknowledged all of its data. Returns `true` only if it did.
+///
+/// Dropping or closing a connection discards stream data that is still unsent,
+/// so a side that writes a final message and then hangs up must call this
+/// first; afterwards the connection may be dropped at once.
+pub async fn finish_and_confirm(send: &mut quinn::SendStream) -> bool {
+    if send.finish().is_err() {
+        return false;
+    }
+    // `Ok(None)`: finished and fully acknowledged. `Ok(Some(_))`: the peer
+    // stopped the stream before reading everything.
+    matches!(
+        tokio::time::timeout(DELIVERY_TIMEOUT, send.stopped()).await,
+        Ok(Ok(None))
+    )
+}
+
 pub fn peer_public_key(conn: &quinn::Connection) -> Result<PublicKey, TransportError> {
     let identity = conn.peer_identity().ok_or(TransportError::NoPeerIdentity)?;
     let certs = identity
