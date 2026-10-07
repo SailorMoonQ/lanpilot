@@ -267,7 +267,8 @@ async fn wrong_password_fails_and_eventually_locks() {
         .await
         .unwrap_err();
         assert!(matches!(err, PairingFlowError::WrongPassword), "{err:?}");
-        // The client hangs up instead of confirming; the server counts a failure.
+        // The client hangs up instead of confirming; the server sees an error,
+        // and the attempt was counted when it began.
         assert!(task.await.unwrap().is_err());
     }
 
@@ -384,11 +385,12 @@ async fn parallel_password_attempts_cannot_exceed_limit() {
     for t in tasks {
         let _ = t.await.unwrap();
     }
-    assert!(
-        wrong <= MAX_FAILURES as usize,
+    // Reservations are atomic, so exactly MAX_FAILURES attempts ran SPAKE2.
+    assert_eq!(
+        wrong, MAX_FAILURES as usize,
         "{wrong} wrong-password results"
     );
-    assert_eq!(wrong + locked, total);
+    assert_eq!(locked, 3);
     assert!(auth.approved.lock().unwrap().is_empty());
 }
 
