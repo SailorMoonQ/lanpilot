@@ -149,6 +149,24 @@ pub(crate) fn absolute_target(
     )
 }
 
+/// The position a relative move starts from.
+///
+/// `last` is the cursor position read before the previous absolute move and
+/// the target it was sent to. `GetCursorPos` can lag behind `SendInput`, so
+/// if the cursor still reads where it was before that move (and the move was
+/// not a no-op), the move has not landed yet and its target is the base.
+/// Otherwise the move landed, or something else moved the cursor, and the
+/// read position is the base.
+pub(crate) fn base_position(
+    read: (i32, i32),
+    last: Option<((i32, i32), (i32, i32))>,
+) -> (i32, i32) {
+    match last {
+        Some((prev_read, target)) if read == prev_read && prev_read != target => target,
+        _ => read,
+    }
+}
+
 /// Pixel -> 0..=65535 so that Windows' mapping `origin + n * size / 65536`
 /// (floored) lands exactly on the pixel: n = ceil(offset * 65536 / size).
 pub(crate) fn normalize(p: (i32, i32), desk: &VirtualDesk) -> (i32, i32) {
@@ -196,6 +214,8 @@ fn cursor_pos() -> Option<(i32, i32)> {
 #[derive(Debug, Default)]
 pub struct SendInputBackend {
     wheel: WheelAccumulator,
+    /// Cursor position read before the last absolute move, and its target.
+    last: Option<((i32, i32), (i32, i32))>,
 }
 
 impl SendInputBackend {
@@ -217,17 +237,24 @@ impl InputBackend for SendInputBackend {
             return Ok(());
         }
         match (cursor_pos(), virtual_desk()) {
-            (Some(cursor), Some(desk)) => {
-                let (nx, ny) = normalize(absolute_target(cursor, (dx, dy), &desk), &desk);
+            (Some(read), Some(desk)) => {
+                let base = base_position(read, self.last);
+                let target = absolute_target(base, (dx, dy), &desk);
+                let (nx, ny) = normalize(target, &desk);
                 send(&[mouse(
                     nx,
                     ny,
                     0,
                     MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK,
-                )])
+                )])?;
+                self.last = Some((read, target));
+                Ok(())
             }
             // Fall back to a relative move (subject to system acceleration).
-            _ => send(&[mouse(dx, dy, 0, MOUSEEVENTF_MOVE)]),
+            _ => {
+                self.last = None;
+                send(&[mouse(dx, dy, 0, MOUSEEVENTF_MOVE)])
+            }
         }
     }
 
@@ -373,6 +400,59 @@ mod tests {
             absolute_target((0, 0), (i32::MAX, i32::MIN), &desk),
             (1919, 0)
         );
+    }
+
+    #[test]
+    fn base_without_history_is_the_read_position() {
+        assert_eq!(base_position((10, 20), None), (10, 20));
+    }
+
+    #[test]
+    fn base_after_a_landed_move_is_the_read_position() {
+        // The cursor reached the previous target.
+        assert_eq!(
+            base_position((11, 20), Some(((10, 20), (11, 20)))),
+            (11, 20)
+        );
+    }
+
+    #[test]
+    fn base_before_the_previous_move_lands_is_its_target() {
+        // The cursor still reads where it was before the previous move.
+        assert_eq!(
+            base_position((10, 20), Some(((10, 20), (11, 20)))),
+            (11, 20)
+        );
+    }
+
+    #[test]
+    fn base_after_the_user_moved_the_mouse_is_the_read_position() {
+        assert_eq!(
+            base_position((300, 400), Some(((10, 20), (11, 20)))),
+            (300, 400)
+        );
+    }
+
+    #[test]
+    fn base_after_a_clamped_no_op_move_is_the_read_position() {
+        assert_eq!(base_position((0, 0), Some(((0, 0), (0, 0)))), (0, 0));
+    }
+
+    /// Moves the real cursor by 100 px. Run manually:
+    /// `cargo test -p lanpilot-input -- --ignored live_burst_of_small_moves_is_exact`.
+    #[test]
+    #[ignore = "moves the real mouse cursor"]
+    fn live_burst_of_small_moves_is_exact() {
+        let mut b = SendInputBackend::new();
+        // Make room on the right, wherever the cursor starts.
+        b.move_relative(-150, 0).unwrap();
+        let before = cursor_pos().expect("GetCursorPos failed");
+        for _ in 0..100 {
+            b.move_relative(1, 0).unwrap();
+        }
+        let after = cursor_pos().expect("GetCursorPos failed");
+        assert_eq!(after.0 - before.0, 100, "x displacement not exact");
+        assert_eq!(after.1, before.1, "y changed");
     }
 
     /// Moves the real cursor. Run manually: `cargo test -p lanpilot-input -- --ignored`.
