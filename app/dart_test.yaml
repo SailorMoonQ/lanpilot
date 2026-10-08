@@ -1,0 +1,3 @@
+tags:
+  golden:
+    description: Golden screenshot tests; run only on macOS.
