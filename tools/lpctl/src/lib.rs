@@ -122,6 +122,17 @@ pub async fn pair_password(
     Ok(server)
 }
 
+/// Accepts only an Ack or Error answering request `id`.
+fn check_reply(reply: ServerMessage, id: u64) -> Result<(), LpctlError> {
+    match reply.body {
+        Some(server_message::Body::Ack(_)) if reply.request_id == id => Ok(()),
+        Some(server_message::Body::Error(e)) if reply.request_id == id => {
+            Err(LpctlError::Usage(e.message))
+        }
+        _ => Err(LpctlError::Usage("unexpected reply".into())),
+    }
+}
+
 struct Live {
     conn: quinn::Connection,
     session: ClientSession,
@@ -148,11 +159,7 @@ impl Live {
                 .map_err(|_| LpctlError::Usage("no reply within 5 s".into()))?
                 .map_err(core)?
                 .ok_or_else(|| LpctlError::Usage("server closed the stream".into()))?;
-        match reply.body {
-            Some(server_message::Body::Ack(_)) if reply.request_id == id => Ok(()),
-            Some(server_message::Body::Error(e)) => Err(LpctlError::Usage(e.message)),
-            _ => Err(LpctlError::Usage("unexpected reply".into())),
-        }
+        check_reply(reply, id)
     }
 
     async fn motion(&mut self, totals: &[(f32, f32)], scroll: bool) -> Result<(), LpctlError> {
@@ -282,6 +289,28 @@ mod tests {
             vec![(5.0, 5.0)],
             "zero steps still moves"
         );
+    }
+
+    #[test]
+    fn replies_must_answer_the_request() {
+        use lanpilot_core::proto::v1::{Ack, Error as ProtoError};
+        let ack = |request_id| ServerMessage {
+            request_id,
+            body: Some(server_message::Body::Ack(Ack {})),
+        };
+        let error = |request_id| ServerMessage {
+            request_id,
+            body: Some(server_message::Body::Error(ProtoError {
+                code: 1,
+                message: "boom".into(),
+            })),
+        };
+        let msg = |r: Result<(), LpctlError>| r.unwrap_err().to_string();
+        assert!(check_reply(ack(3), 3).is_ok());
+        assert_eq!(msg(check_reply(error(3), 3)), "boom");
+        assert_eq!(msg(check_reply(ack(2), 3)), "unexpected reply");
+        assert_eq!(msg(check_reply(error(2), 3)), "unexpected reply");
+        assert_eq!(msg(check_reply(error(0), 3)), "unexpected reply");
     }
 
     #[test]
