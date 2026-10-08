@@ -56,8 +56,17 @@ fn os_from_str(s: &str) -> Os {
     }
 }
 
+/// Locking model: `io` serializes every file operation inside this process and
+/// a sibling `<file>.lock` advisory lock serializes against other processes
+/// (the CLI). Each mutation re-reads the file under both locks, applies its
+/// change to that fresh copy, writes it, and only then swaps the in-memory map.
+/// So the file is never overwritten with stale state, and every key that
+/// disappears (by us or externally) is broadcast exactly once, after the locks
+/// are released. The `devices` map is locked only briefly, never across I/O.
 pub struct DeviceStore {
     path: PathBuf,
+    lock_path: PathBuf,
+    io: Mutex<()>,
     devices: Mutex<HashMap<PublicKey, PairedDevice>>,
     removed: broadcast::Sender<PublicKey>,
 }
@@ -66,13 +75,20 @@ impl DeviceStore {
     pub fn open(path: PathBuf) -> Result<Arc<Self>, AgentError> {
         let devices = Self::read_file(&path)?;
         let (removed, _) = broadcast::channel(64);
+        let mut lock_name = path.file_name().map(ToOwned::to_owned).unwrap_or_default();
+        lock_name.push(".lock");
+        let lock_path = path.with_file_name(lock_name);
         Ok(Arc::new(Self {
             path,
+            lock_path,
+            io: Mutex::new(()),
             devices: Mutex::new(devices),
             removed,
         }))
     }
 
+    /// A missing file reads as an empty set on purpose: deleting the file
+    /// revokes every paired device.
     fn read_file(path: &Path) -> Result<HashMap<PublicKey, PairedDevice>, AgentError> {
         let text = match std::fs::read_to_string(path) {
             Ok(t) => t,
@@ -126,6 +142,52 @@ impl DeviceStore {
         self.devices.lock().expect("device store lock poisoned")
     }
 
+    /// Run one serialized read-modify-write cycle. `change` edits the freshly
+    /// read map and returns extra keys to broadcast plus whether to write the
+    /// file. Returns every key that was broadcast.
+    fn sync_with<F>(&self, change: F) -> Result<Vec<PublicKey>, AgentError>
+    where
+        F: FnOnce(&mut HashMap<PublicKey, PairedDevice>) -> (Vec<PublicKey>, bool),
+    {
+        let announce = {
+            let _io = self.io.lock().expect("device store io lock poisoned");
+            if let Some(dir) = self.lock_path.parent() {
+                std::fs::create_dir_all(dir)?;
+            }
+            let lock_file = std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .write(true)
+                .open(&self.lock_path)?;
+            lock_file.lock()?;
+
+            let mut fresh = Self::read_file(&self.path)?;
+            let mut announce: Vec<PublicKey> = self
+                .lock()
+                .keys()
+                .filter(|k| !fresh.contains_key(*k))
+                .copied()
+                .collect();
+            let (extra, write) = change(&mut fresh);
+            for k in extra {
+                if !announce.contains(&k) {
+                    announce.push(k);
+                }
+            }
+            if write {
+                // On failure memory stays untouched so it matches the disk.
+                self.write_file(&fresh)?;
+            }
+            *self.lock() = fresh;
+            drop(lock_file);
+            announce
+        };
+        for k in &announce {
+            let _ = self.removed.send(*k);
+        }
+        Ok(announce)
+    }
+
     pub fn contains(&self, key: &PublicKey) -> bool {
         self.lock().contains_key(key)
     }
@@ -141,29 +203,31 @@ impl DeviceStore {
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or_default();
-        let mut devices = self.lock();
-        let paired_at = devices.get(&key).map_or(now, |d| d.paired_at);
-        devices.insert(
-            key,
-            PairedDevice {
-                public_key: key,
-                name: name.to_owned(),
-                os,
-                paired_at,
-            },
-        );
-        self.write_file(&devices)
+        self.sync_with(|fresh| {
+            let paired_at = fresh.get(&key).map_or(now, |d| d.paired_at);
+            fresh.insert(
+                key,
+                PairedDevice {
+                    public_key: key,
+                    name: name.to_owned(),
+                    os,
+                    paired_at,
+                },
+            );
+            (Vec::new(), true)
+        })?;
+        Ok(())
     }
 
     pub fn remove(&self, key: &PublicKey) -> Result<bool, AgentError> {
-        let mut devices = self.lock();
-        if devices.remove(key).is_none() {
-            return Ok(false);
-        }
-        self.write_file(&devices)?;
-        drop(devices);
-        let _ = self.removed.send(*key);
-        Ok(true)
+        let announced = self.sync_with(|fresh| {
+            if fresh.remove(key).is_some() {
+                (vec![*key], true)
+            } else {
+                (Vec::new(), false)
+            }
+        })?;
+        Ok(announced.contains(key))
     }
 
     pub fn remove_by_short_id(&self, short_id: &str) -> Result<Option<PairedDevice>, AgentError> {
@@ -182,19 +246,7 @@ impl DeviceStore {
     }
 
     pub fn reload(&self) -> Result<Vec<PublicKey>, AgentError> {
-        let fresh = Self::read_file(&self.path)?;
-        let mut devices = self.lock();
-        let gone: Vec<PublicKey> = devices
-            .keys()
-            .filter(|k| !fresh.contains_key(*k))
-            .copied()
-            .collect();
-        *devices = fresh;
-        drop(devices);
-        for k in &gone {
-            let _ = self.removed.send(*k);
-        }
-        Ok(gone)
+        self.sync_with(|_| (Vec::new(), false))
     }
 
     pub fn subscribe_removed(&self) -> broadcast::Receiver<PublicKey> {
@@ -204,14 +256,28 @@ impl DeviceStore {
     pub fn watch(self: &Arc<Self>) -> Result<notify::RecommendedWatcher, AgentError> {
         use notify::{RecursiveMode, Watcher};
         let store = Arc::downgrade(self);
-        let target = self.path.file_name().map(ToOwned::to_owned);
+        let target = self
+            .path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned());
         let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
-            let Ok(event) = res else { return };
-            let touches_file = event
-                .paths
-                .iter()
-                .any(|p| p.file_name().map(ToOwned::to_owned) == target);
-            if !touches_file {
+            let relevant = match res {
+                Ok(event) => {
+                    event.need_rescan()
+                        || event.paths.iter().any(|p| {
+                            let name = p.file_name().map(|n| n.to_string_lossy());
+                            match (&name, &target) {
+                                (Some(n), Some(t)) => file_names_match(n, t),
+                                _ => false,
+                            }
+                        })
+                }
+                Err(e) => {
+                    tracing::warn!("device file watcher error: {e}");
+                    true
+                }
+            };
+            if !relevant {
                 return;
             }
             if let Some(store) = store.upgrade()
@@ -230,7 +296,19 @@ impl DeviceStore {
         watcher
             .watch(&dir, RecursiveMode::NonRecursive)
             .map_err(|e| AgentError::Config(e.to_string()))?;
+        // Catch anything that changed between `open` and the watcher starting.
+        if let Err(e) = self.reload() {
+            tracing::warn!("initial reload of paired devices failed: {e}");
+        }
         Ok(watcher)
+    }
+}
+
+fn file_names_match(a: &str, b: &str) -> bool {
+    if cfg!(windows) {
+        a.eq_ignore_ascii_case(b)
+    } else {
+        a == b
     }
 }
 
@@ -324,6 +402,74 @@ mod tests {
             .expect("watcher noticed within 5 s")
             .unwrap();
         assert_eq!(got, key(5));
+    }
+
+    #[test]
+    fn own_write_then_reload_broadcasts_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = DeviceStore::open(dir.path().join("devices.json")).unwrap();
+        store.add(key(1), "a", Os::Ios).unwrap();
+        let mut rx = store.subscribe_removed();
+        assert!(store.reload().unwrap().is_empty());
+        assert_eq!(
+            rx.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        );
+    }
+
+    #[test]
+    fn remove_broadcasts_exactly_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = DeviceStore::open(dir.path().join("devices.json")).unwrap();
+        store.add(key(1), "a", Os::Ios).unwrap();
+        let mut rx = store.subscribe_removed();
+        assert!(store.remove(&key(1)).unwrap());
+        store.reload().unwrap();
+        store.reload().unwrap();
+        assert_eq!(rx.try_recv().unwrap(), key(1));
+        assert_eq!(
+            rx.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        );
+    }
+
+    #[test]
+    fn external_removal_survives_a_concurrent_add() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("devices.json");
+        let running = DeviceStore::open(path.clone()).unwrap();
+        running.add(key(1), "a", Os::Ios).unwrap();
+        let mut rx = running.subscribe_removed();
+
+        DeviceStore::open(path.clone())
+            .unwrap()
+            .remove(&key(1))
+            .unwrap();
+        running.add(key(2), "b", Os::Ios).unwrap();
+
+        let reopened = DeviceStore::open(path).unwrap();
+        assert!(reopened.contains(&key(2)));
+        assert!(!reopened.contains(&key(1)));
+        assert!(!running.contains(&key(1)));
+        assert_eq!(rx.try_recv().unwrap(), key(1));
+    }
+
+    #[tokio::test]
+    async fn watcher_catches_removal_made_before_watch_started() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("devices.json");
+        let running = DeviceStore::open(path.clone()).unwrap();
+        running.add(key(6), "a", Os::Ios).unwrap();
+        let mut rx = running.subscribe_removed();
+
+        DeviceStore::open(path).unwrap().remove(&key(6)).unwrap();
+        let _watcher = running.watch().unwrap();
+
+        let got = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("removal noticed within 5 s")
+            .unwrap();
+        assert_eq!(got, key(6));
     }
 
     #[test]
