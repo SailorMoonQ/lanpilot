@@ -263,11 +263,16 @@ fn shutdown_signal() -> std::io::Result<impl Future<Output = &'static str>> {
 /// How often the agent checks whether its LAN addresses changed.
 const ADVERTISE_REFRESH: Duration = Duration::from_secs(30);
 
-/// Starts mDNS on `addrs`; a failure is logged, not fatal.
+/// Starts mDNS on `addrs`; a failure is logged, not fatal. With no addresses
+/// nothing is advertised until the refresh sees one appear.
 fn start_advertiser(agent: &Agent, port: u16, addrs: Vec<IpAddr>) -> Option<Advertiser> {
-    tracing::info!("mDNS advertising on {addrs:?}");
-    match agent.advertise(port, addrs) {
-        Ok(a) => Some(a),
+    match agent.advertise(port, addrs.clone()) {
+        Ok(a) => {
+            if a.is_some() {
+                tracing::info!("mDNS advertising on {addrs:?}");
+            }
+            a
+        }
         Err(e) => {
             tracing::warn!("mDNS advertising failed, phones must use the QR code or the IP: {e}");
             None
