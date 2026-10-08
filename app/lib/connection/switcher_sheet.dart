@@ -19,11 +19,21 @@ Future<void> showSwitcher(BuildContext context) => showModalBottomSheet<void>(
 
 /// Paired computers (spec 2.4): online state, current one checked, swipe left
 /// to unpair, then "Add computer" and "Settings".
-class SwitcherSheet extends ConsumerWidget {
+class SwitcherSheet extends ConsumerStatefulWidget {
   const SwitcherSheet({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<SwitcherSheet> createState() => _SwitcherSheetState();
+}
+
+class _SwitcherSheetState extends ConsumerState<SwitcherSheet> {
+  // Unpairing the current computer awaits the network, so its row would stay
+  // in the store while the sheet rebuilds; a dismissed Dismissible must leave
+  // the tree at once.
+  final _dismissed = <String>{};
+
+  @override
+  Widget build(BuildContext context) {
     final store = ref.watch(serverStoreProvider);
     final discovery = ref.watch(discoveryProvider);
     final connection = ref.watch(connectionProvider);
@@ -50,38 +60,42 @@ class SwitcherSheet extends ConsumerWidget {
                 ),
               ),
               for (final s in store.servers.value)
-                Dismissible(
-                  key: Key('switcher-${s.shortId}'),
-                  direction: DismissDirection.endToStart,
-                  background: Container(
-                    color: const Color(0xFFFF3B30),
-                    alignment: Alignment.centerRight,
-                    padding: const EdgeInsets.symmetric(horizontal: 20),
-                    child: Text(
-                      l.unpair,
-                      style: const TextStyle(color: Colors.white),
+                if (!_dismissed.contains(s.shortId))
+                  Dismissible(
+                    key: Key('switcher-${s.shortId}'),
+                    direction: DismissDirection.endToStart,
+                    background: Container(
+                      color: const Color(0xFFFF3B30),
+                      alignment: Alignment.centerRight,
+                      padding: const EdgeInsets.symmetric(horizontal: 20),
+                      child: Text(
+                        l.unpair,
+                        style: const TextStyle(color: Colors.white),
+                      ),
                     ),
-                  ),
-                  confirmDismiss: (_) => _confirmUnpair(context, s),
-                  onDismissed: (_) => unawaited(connection.unpair(s)),
-                  child: ListTile(
-                    leading: Icon(osIcon(s.os)),
-                    title: Text(s.name),
-                    subtitle: Text(
-                      '${discovery.lookup(s.shortId) != null ? l.online : l.offline}'
-                      ' · ${osLabel(s.os, l)}',
-                    ),
-                    trailing: s.shortId == current
-                        ? Icon(Icons.check, color: p.accent)
-                        : null,
-                    onTap: () {
-                      Navigator.of(context).pop();
-                      if (s.shortId != current) {
-                        unawaited(connection.switchTo(s));
-                      }
+                    confirmDismiss: (_) => _confirmUnpair(context, s),
+                    onDismissed: (_) {
+                      setState(() => _dismissed.add(s.shortId));
+                      unawaited(connection.unpair(s));
                     },
+                    child: ListTile(
+                      leading: Icon(osIcon(s.os)),
+                      title: Text(s.name),
+                      subtitle: Text(
+                        '${discovery.lookup(s.shortId) != null ? l.online : l.offline}'
+                        ' · ${osLabel(s.os, l)}',
+                      ),
+                      trailing: s.shortId == current
+                          ? Icon(Icons.check, color: p.accent)
+                          : null,
+                      onTap: () {
+                        Navigator.of(context).pop();
+                        if (s.shortId != current) {
+                          unawaited(connection.switchTo(s));
+                        }
+                      },
+                    ),
                   ),
-                ),
               const Divider(),
               ListTile(
                 key: const Key('switcher-add'),

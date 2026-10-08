@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:lanpilot/bridge/lanpilot_client.dart';
@@ -81,6 +83,61 @@ void main() {
     expect(h.services.servers.byId(otherId), isNull);
   });
 
+  testWidgets('cancelling the unpair confirm keeps the computer', (
+    tester,
+  ) async {
+    final h = await Harness.create(
+      servers: [
+        desk(),
+        desk(shortId: otherId, name: 'Laptop'),
+      ],
+    );
+    await tester.pumpWidget(testApp(h, header()));
+    await h.connect(tester);
+    await tester.tap(find.byKey(const Key('status-header')));
+    await tester.pumpAndSettle();
+    await tester.drag(
+      find.byKey(const Key('switcher-$otherId')),
+      const Offset(-500, 0),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(TextButton, 'Cancel'));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('switcher-$otherId')), findsOneWidget);
+    expect(h.services.servers.byId(otherId), isNotNull);
+  });
+
+  testWidgets('unpairing the connected computer removes its row at once', (
+    tester,
+  ) async {
+    final h = await Harness.create(
+      servers: [
+        desk(),
+        desk(shortId: otherId, name: 'Laptop'),
+      ],
+    );
+    await tester.pumpWidget(testApp(h, header()));
+    await h.connect(tester);
+    h.client.unpairGate = Completer<void>();
+    await tester.tap(find.byKey(const Key('status-header')));
+    await tester.pumpAndSettle();
+    await tester.drag(
+      find.byKey(const Key('switcher-$deskId')),
+      const Offset(-500, 0),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(TextButton, 'Unpair'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+    await tester.pump(const Duration(milliseconds: 500));
+    expect(tester.takeException(), isNull);
+    expect(find.byKey(const Key('switcher-$deskId')), findsNothing);
+    h.client.unpairGate!.complete();
+    await tester.pump(const Duration(seconds: 2));
+    await tester.pumpAndSettle();
+    expect(h.services.servers.byId(deskId), isNull);
+  });
+
   testWidgets('add computer opens the add page', (tester) async {
     final h = await Harness.create(servers: [desk()]);
     await tester.pumpWidget(testApp(h, header()));
@@ -117,6 +174,57 @@ void main() {
         ),
       );
       expect(find.byKey(const Key('connection-overlay')), findsNothing);
+    });
+
+    testWidgets('blocks touches unless connected', (tester) async {
+      Future<int> taps(ConnState state) async {
+        final h = await Harness.create(servers: [desk()]);
+        var n = 0;
+        await tester.pumpWidget(
+          testApp(
+            h,
+            Scaffold(
+              body: Stack(
+                children: [
+                  Positioned.fill(
+                    child: GestureDetector(
+                      behavior: HitTestBehavior.opaque,
+                      onTap: () => n++,
+                    ),
+                  ),
+                  Positioned.fill(child: ConnectionOverlay(state: state)),
+                ],
+              ),
+            ),
+          ),
+        );
+        await tester.pump();
+        await tester.tapAt(tester.getCenter(find.byType(Stack).first));
+        await tester.pump();
+        return n;
+      }
+
+      expect(
+        await taps(ConnState(status: ConnStatus.connecting, server: desk())),
+        0,
+      );
+      expect(
+        await taps(
+          ConnState(
+            status: ConnStatus.connected,
+            server: desk(),
+            session: const SessionInfo(
+              generation: 1,
+              serverName: 'Desk',
+              serverOs: OsKind.windows,
+              version: 1,
+              capabilities: [],
+              addr: '1.2.3.4:5',
+            ),
+          ),
+        ),
+        1,
+      );
     });
 
     testWidgets('offline says it is retrying', (tester) async {
