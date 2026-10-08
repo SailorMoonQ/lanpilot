@@ -11,8 +11,18 @@ REPO_DIR="$(cd "$APP_DIR/.." && pwd)"
 WORK="$(mktemp -d)"
 LOG="$WORK/agent.log"
 
+# SIGINT (not SIGTERM) so the agent withdraws its mDNS record; stale records
+# would pile up on this Mac and in every browser on the network.
 cleanup() {
-  if [[ -n "${AGENT_PID:-}" ]]; then kill "$AGENT_PID" 2>/dev/null || true; fi
+  if [[ -z "${AGENT_PID:-}" ]]; then return; fi
+  kill -INT "$AGENT_PID" 2>/dev/null || true
+  for _ in $(seq 1 50); do
+    kill -0 "$AGENT_PID" 2>/dev/null || break
+    sleep 0.1
+  done
+  kill -KILL "$AGENT_PID" 2>/dev/null || true
+  wait "$AGENT_PID" 2>/dev/null || true
+  AGENT_PID=
 }
 trap cleanup EXIT
 
@@ -27,42 +37,26 @@ fi
 
 (cd "$REPO_DIR" && cargo build -q -p lanpilot-agent)
 
-# On the simulator NWBrowser sometimes never resolves a freshly started agent
-# (the app's resolver stays "preparing"); a fresh agent and a new run clear it.
-# Only the nearby check can fail this way, so retry the whole run a few times.
-run_once() {
-  RUST_LOG=info,lanpilot_input=debug \
-    "$REPO_DIR/target/debug/lanpilot-agent" --home "$WORK/home-$attempt" run --pair --mock-input \
-    >"$LOG" 2>&1 &
-  AGENT_PID=$!
+RUST_LOG=info,lanpilot_input=debug \
+  "$REPO_DIR/target/debug/lanpilot-agent" --home "$WORK/home" run --pair --mock-input \
+  >"$LOG" 2>&1 &
+AGENT_PID=$!
 
-  for _ in $(seq 1 150); do
-    grep -q 'lanpilot://pair?d=' "$LOG" && break
-    sleep 0.2
-  done
-  URI="$(grep -Eo 'lanpilot://pair\?d=[A-Za-z0-9_-]+' "$LOG" | head -1 || true)"
-  ID="$(sed -n 's/.*(\([0-9a-f]\{16\}\)) listening on UDP.*/\1/p' "$LOG" | head -1)"
-  if [[ -z "$URI" ]]; then
-    echo "The agent printed no pairing link:" >&2
-    cat "$LOG" >&2
-    exit 1
-  fi
-
-  cd "$APP_DIR"
-  flutter test integration_test/e2e_test.dart -d "$DEVICE" \
-    --dart-define=PAIR_URI="$URI" --dart-define=AGENT_ID="$ID"
-}
-
-for attempt in 1 2 3; do
-  if run_once; then break; fi
-  if [[ "$attempt" == 3 ]]; then
-    echo "The integration test failed 3 times." >&2
-    exit 1
-  fi
-  echo "Integration test failed (attempt $attempt), retrying with a fresh agent." >&2
-  cleanup
-  AGENT_PID=
+for _ in $(seq 1 150); do
+  grep -q 'lanpilot://pair?d=' "$LOG" && break
+  sleep 0.2
 done
+URI="$(grep -Eo 'lanpilot://pair\?d=[A-Za-z0-9_-]+' "$LOG" | head -1 || true)"
+ID="$(sed -n 's/.*(\([0-9a-f]\{16\}\)) listening on UDP.*/\1/p' "$LOG" | head -1)"
+if [[ -z "$URI" ]]; then
+  echo "The agent printed no pairing link:" >&2
+  cat "$LOG" >&2
+  exit 1
+fi
+
+cd "$APP_DIR"
+flutter test integration_test/e2e_test.dart -d "$DEVICE" \
+  --dart-define=PAIR_URI="$URI" --dart-define=AGENT_ID="$ID"
 
 sleep 1
 for pattern in 'mock input: move' 'mock input: Left button down' 'mock input: media PlayPause'; do
