@@ -280,4 +280,80 @@ void main() {
       expect(sink.actions.last, 'up left');
     });
   });
+
+  void startDrag(FakeAsync async) {
+    tap(1, 0);
+    async.elapse(ms(50));
+    m.pointerDown(2, Offset.zero, ms(130));
+    m.pointerMove(2, const Offset(10, 0), ms(150));
+  }
+
+  test('cancelling a resting extra finger then the primary releases once', () {
+    fakeAsync((async) {
+      setUpMachine();
+      startDrag(async);
+      m.pointerDown(3, const Offset(50, 0), ms(160));
+      m.pointerCancel(3, ms(170));
+      m.pointerCancel(2, ms(180));
+      async.elapse(ms(500));
+      expect(sink.actions.where((a) => a == 'up left'), hasLength(1));
+      expect(sink.actions.last, 'up left');
+    });
+  });
+
+  test('a drag continues after an extra finger is cancelled', () {
+    fakeAsync((async) {
+      setUpMachine();
+      startDrag(async);
+      m.pointerDown(3, const Offset(50, 0), ms(160));
+      m.pointerCancel(3, ms(170));
+      m.pointerMove(2, const Offset(20, 0), ms(180));
+      m.pointerUp(2, ms(600));
+      expect(sink.actions, ['down left', 'move 10,0', 'move 10,0', 'up left']);
+    });
+  });
+
+  test('dispose releases a drag with a resting extra finger', () {
+    fakeAsync((async) {
+      setUpMachine();
+      startDrag(async);
+      m.pointerDown(3, const Offset(50, 0), ms(160));
+      m.dispose();
+      expect(sink.actions.last, 'up left');
+    });
+  });
+
+  test('a wobbly second tap is still a double click', () {
+    fakeAsync((async) {
+      setUpMachine();
+      tap(1, 0);
+      async.elapse(ms(50));
+      m.pointerDown(2, Offset.zero, ms(130));
+      m.pointerMove(2, const Offset(5, 0), ms(150));
+      m.pointerUp(2, ms(210));
+      async.elapse(ms(500));
+      expect(sink.actions, ['down left', 'move 5,0', 'up left', 'click left']);
+    });
+  });
+
+  test('a new touch after a scroll stops the fling', () {
+    setUpMachine();
+    m.pointerDown(1, Offset.zero, ms(0));
+    m.pointerDown(2, const Offset(40, 0), ms(10));
+    m.pointerMove(1, const Offset(0, 20), ms(30));
+    m.pointerMove(2, const Offset(40, 20), ms(30));
+    m.pointerUp(1, ms(40));
+    m.pointerDown(3, const Offset(90, 0), ms(60));
+    expect(sink.log.sublist(sink.log.indexOf('scrollEnd')), contains('stop'));
+  });
+
+  test('a brief second touch does not freeze the pointer', () {
+    setUpMachine();
+    m.pointerDown(1, Offset.zero, ms(0));
+    m.pointerMove(1, const Offset(10, 0), ms(20));
+    m.pointerDown(2, const Offset(100, 0), ms(100));
+    m.pointerUp(2, ms(150));
+    m.pointerMove(1, const Offset(20, 0), ms(170));
+    expect(sink.actions, ['move 10,0', 'move 10,0']);
+  });
 }

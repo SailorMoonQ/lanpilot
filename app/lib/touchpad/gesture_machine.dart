@@ -82,6 +82,7 @@ class GestureMachine {
   Duration _firstDown = Duration.zero;
   int _maxFingers = 0;
   bool _tapPossible = false;
+  bool _leftHeld = false;
   List<int> _pair = const [];
   Offset _pairStartCentroid = Offset.zero;
   double _pairStartDistance = 0;
@@ -89,6 +90,7 @@ class GestureMachine {
   double _lastDistance = 0;
 
   void pointerDown(int id, Offset position, Duration time) {
+    _sink.stopInertia();
     _fingers[id] = _Finger(position, time);
     switch (_phase) {
       case _Phase.idle:
@@ -135,6 +137,7 @@ class GestureMachine {
       case _Phase.dragArmed:
         if (f.travel > Tuning.moveThreshold) {
           _phase = _Phase.dragging;
+          _leftHeld = true;
           _sink.buttonDown(MouseButtonKind.left);
           _sink.haptic(HapticKind.dragStart);
           _sink.move(position - f.start, time);
@@ -177,11 +180,19 @@ class GestureMachine {
         _phase = _Phase.idle;
       case _Phase.dragging:
         if (id == _primary) {
-          _sink.buttonUp(MouseButtonKind.left);
+          _releaseLeft();
+          // A wobbly second tap of a double tap: the first tap still clicks.
+          if (quick) _clickNow(MouseButtonKind.left);
           _phase = _rest();
         }
       case _Phase.multi:
         if (f.travel >= Tuning.tapMaxMove) _tapPossible = false;
+        if (_fingers.length == 1 && !_tapPossible) {
+          // A brief extra touch ended: the remaining finger moves the pointer.
+          _primary = _fingers.keys.first;
+          _phase = _Phase.moving;
+          return;
+        }
         if (_fingers.isNotEmpty) {
           _choosePair();
           return;
@@ -204,13 +215,13 @@ class GestureMachine {
     }
   }
 
-  /// The system took the touch (a call, Control Center). Never clicks, always
-  /// releases a held drag.
+  /// The system took the touch (a call, Control Center). The cancelled touch
+  /// itself never clicks (a tap already completed before it still does) and a
+  /// held drag is always released. A cancelled scroll does not fling.
   void pointerCancel(int id, Duration time) {
     if (_fingers.remove(id) == null) return;
-    if (_phase == _Phase.dragging && id == _primary) {
-      _sink.buttonUp(MouseButtonKind.left);
-    }
+    if (_phase == _Phase.dragging && id != _primary) return;
+    if (id == _primary) _releaseLeft();
     if (_phase == _Phase.dragArmed) _clickNow(MouseButtonKind.left);
     _tapPossible = false;
     _phase = _rest();
@@ -218,13 +229,18 @@ class GestureMachine {
 
   void dispose() {
     _tapTimer?.cancel();
-    if (_phase == _Phase.dragging) _sink.buttonUp(MouseButtonKind.left);
+    _releaseLeft();
     _fingers.clear();
     _phase = _Phase.idle;
   }
 
+  void _releaseLeft() {
+    if (!_leftHeld) return;
+    _leftHeld = false;
+    _sink.buttonUp(MouseButtonKind.left);
+  }
+
   void _startGesture(int id, Duration time) {
-    _sink.stopInertia();
     _sink.beginGesture();
     _primary = id;
     _firstDown = time;
