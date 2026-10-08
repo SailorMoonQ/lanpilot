@@ -9,6 +9,8 @@ use lanpilot_agent::paths::Paths;
 use lanpilot_agent::secret::{clear_password, store_password};
 use lanpilot_agent::server::Agent;
 use lanpilot_core::pairing::tokens::TOKEN_TTL;
+use lanpilot_input::InputBackend;
+use lanpilot_input::logging::LoggingBackend;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
@@ -29,6 +31,10 @@ enum Command {
         /// Show a pairing QR code (refreshed every 2 minutes).
         #[arg(long)]
         pair: bool,
+        /// Log input instead of injecting it (for phone app development;
+        /// set RUST_LOG=lanpilot_input=debug to see each call).
+        #[arg(long)]
+        mock_input: bool,
     },
     /// Manage the pairing password.
     Password {
@@ -75,7 +81,7 @@ fn real_main(cli: Cli) -> Result<(), AgentError> {
         None => Paths::default_for_user()?,
     };
     match cli.command {
-        Command::Run { pair } => run(&paths, pair),
+        Command::Run { pair, mock_input } => run(&paths, pair, mock_input),
         Command::Password {
             action: PasswordAction::Set,
         } => {
@@ -132,14 +138,19 @@ fn real_main(cli: Cli) -> Result<(), AgentError> {
     }
 }
 
-fn run(paths: &Paths, pair: bool) -> Result<(), AgentError> {
+fn run(paths: &Paths, pair: bool, mock_input: bool) -> Result<(), AgentError> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
         .init();
-    let input = lanpilot_input::open_default().map_err(|e| AgentError::Core(e.to_string()))?;
+    let input: Box<dyn InputBackend> = if mock_input {
+        tracing::warn!("mock input: input is logged, not injected");
+        Box::new(LoggingBackend::new())
+    } else {
+        lanpilot_input::open_default().map_err(|e| AgentError::Core(e.to_string()))?
+    };
     let runtime = tokio::runtime::Runtime::new()?;
     runtime.block_on(async {
         let agent = Agent::new(paths, input)?;
@@ -185,11 +196,31 @@ fn run(paths: &Paths, pair: bool) -> Result<(), AgentError> {
 
 #[cfg(test)]
 mod tests {
-    use super::Cli;
-    use clap::CommandFactory;
+    use super::{Cli, Command};
+    use clap::{CommandFactory, Parser};
 
     #[test]
     fn cli_definition_is_valid() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn run_accepts_mock_input() {
+        let cli = Cli::try_parse_from(["lanpilot-agent", "run", "--mock-input"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Run {
+                mock_input: true,
+                pair: false
+            }
+        ));
+        let cli = Cli::try_parse_from(["lanpilot-agent", "run"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Run {
+                mock_input: false,
+                ..
+            }
+        ));
     }
 }

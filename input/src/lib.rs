@@ -8,6 +8,7 @@
 mod keys;
 #[cfg(target_os = "linux")]
 pub mod linux;
+pub mod logging;
 pub mod recording;
 pub mod wheel;
 #[cfg(windows)]
@@ -57,7 +58,8 @@ pub trait InputBackend: Send {
     fn text(&mut self, text: &str) -> Result<(), InputError>;
 }
 
-/// The real backend for this platform.
+/// The real backend for this platform, or the logging mock
+/// ([`logging::LoggingBackend`]) where there is none (macOS in M1).
 pub fn open_default() -> Result<Box<dyn InputBackend>, InputError> {
     #[cfg(windows)]
     {
@@ -69,8 +71,7 @@ pub fn open_default() -> Result<Box<dyn InputBackend>, InputError> {
     }
     #[cfg(not(any(windows, target_os = "linux")))]
     {
-        Err(InputError::Unsupported(
-            "no input backend for this platform",
-        ))
+        tracing::warn!("no input backend for this platform; input is only logged");
+        Ok(Box::new(logging::LoggingBackend::new()))
     }
 }
