@@ -8,11 +8,14 @@ use lanpilot_agent::pairing::{lan_ipv4_addrs, render_qr};
 use lanpilot_agent::paths::Paths;
 use lanpilot_agent::secret::{clear_password, store_password};
 use lanpilot_agent::server::Agent;
+use lanpilot_core::discovery::Advertiser;
 use lanpilot_core::pairing::tokens::TOKEN_TTL;
 use lanpilot_input::InputBackend;
 use lanpilot_input::logging::LoggingBackend;
-use std::net::SocketAddr;
+use std::collections::BTreeSet;
+use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
+use std::time::Duration;
 
 #[derive(Parser)]
 #[command(name = "lanpilot-agent", version, about = "LanPilot PC agent")]
@@ -156,15 +159,8 @@ fn run(paths: &Paths, pair: bool, mock_input: bool) -> Result<(), AgentError> {
         let agent = Agent::new(paths, input)?;
         let port = agent.config().general.port;
         let endpoint = agent.bind(SocketAddr::from(([0, 0, 0, 0], port)))?;
-        let _advertiser = match agent.advertise(port) {
-            Ok(a) => Some(a),
-            Err(e) => {
-                tracing::warn!(
-                    "mDNS advertising failed, phones must use the QR code or the IP: {e}"
-                );
-                None
-            }
-        };
+        let mut addrs = lan_ipv4_addrs();
+        let mut advertiser = start_advertiser(&agent, port, addrs.clone());
         tracing::info!(
             "LanPilot agent \"{}\" ({}) listening on UDP {port}",
             agent.config().general.name,
@@ -186,18 +182,80 @@ fn run(paths: &Paths, pair: bool, mock_input: bool) -> Result<(), AgentError> {
             });
         }
         let serving = tokio::spawn(agent.clone().serve(endpoint.clone()));
-        tokio::signal::ctrl_c().await?;
+        let mut refresh = tokio::time::interval(ADVERTISE_REFRESH);
+        refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        refresh.tick().await;
+        let ctrl_c = tokio::signal::ctrl_c();
+        tokio::pin!(ctrl_c);
+        loop {
+            tokio::select! {
+                r = &mut ctrl_c => {
+                    r?;
+                    break;
+                }
+                _ = refresh.tick() => {
+                    let latest = lan_ipv4_addrs();
+                    if addrs_changed(&addrs, &latest) {
+                        tracing::info!(
+                            "LAN addresses changed from {addrs:?} to {latest:?}, re-advertising"
+                        );
+                        if let Some(old) = advertiser.take() {
+                            old.stop().await;
+                        }
+                        advertiser = start_advertiser(&agent, port, latest.clone());
+                        addrs = latest;
+                    }
+                }
+            }
+        }
         tracing::info!("shutting down");
+        if let Some(advertiser) = advertiser.take() {
+            advertiser.stop().await;
+        }
         agent.shutdown(&endpoint).await;
         serving.abort();
         Ok::<(), AgentError>(())
     })
 }
 
+/// How often the agent checks whether its LAN addresses changed.
+const ADVERTISE_REFRESH: Duration = Duration::from_secs(30);
+
+/// Starts mDNS on `addrs`; a failure is logged, not fatal.
+fn start_advertiser(agent: &Agent, port: u16, addrs: Vec<IpAddr>) -> Option<Advertiser> {
+    tracing::info!("mDNS advertising on {addrs:?}");
+    match agent.advertise(port, addrs) {
+        Ok(a) => Some(a),
+        Err(e) => {
+            tracing::warn!("mDNS advertising failed, phones must use the QR code or the IP: {e}");
+            None
+        }
+    }
+}
+
+/// Whether two address lists differ as sets.
+fn addrs_changed(current: &[IpAddr], latest: &[IpAddr]) -> bool {
+    let set = |a: &[IpAddr]| a.iter().copied().collect::<BTreeSet<IpAddr>>();
+    set(current) != set(latest)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Cli, Command};
+    use super::{Cli, Command, addrs_changed};
     use clap::{CommandFactory, Parser};
+    use std::net::IpAddr;
+
+    #[test]
+    fn addrs_change_is_a_set_comparison() {
+        let a: IpAddr = "192.168.50.203".parse().unwrap();
+        let b: IpAddr = "10.0.0.7".parse().unwrap();
+        assert!(!addrs_changed(&[a, b], &[b, a]));
+        assert!(!addrs_changed(&[a], &[a, a]));
+        assert!(addrs_changed(&[a], &[a, b]));
+        assert!(addrs_changed(&[a], &[]));
+        assert!(addrs_changed(&[], &[b]));
+        assert!(!addrs_changed(&[], &[]));
+    }
 
     #[test]
     fn cli_definition_is_valid() {
