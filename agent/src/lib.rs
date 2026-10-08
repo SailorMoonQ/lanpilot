@@ -1,6 +1,7 @@
 //! The LanPilot PC agent (spec section 5).
 
 pub mod config;
+pub mod devices;
 pub mod fsutil;
 pub mod paths;
 pub mod secret;
