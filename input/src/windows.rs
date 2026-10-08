@@ -211,7 +211,7 @@ fn cursor_pos() -> Option<(i32, i32)> {
     (unsafe { GetCursorPos(&mut p) } != 0).then_some((p.x, p.y))
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct SendInputBackend {
     wheel: WheelAccumulator,
     /// Cursor position read before the last absolute move, and its target.
@@ -227,7 +227,17 @@ impl SendInputBackend {
         // FALSE if awareness was already set, which is fine to ignore. Without
         // this, GetCursorPos reports virtualized coordinates on scaled displays.
         unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
-        Self::default()
+        Self {
+            wheel: WheelAccumulator::default(),
+            last: None,
+        }
+    }
+}
+
+/// Same as `new`: the DPI awareness setup must not be skippable.
+impl Default for SendInputBackend {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -400,6 +410,24 @@ mod tests {
             absolute_target((0, 0), (i32::MAX, i32::MIN), &desk),
             (1919, 0)
         );
+    }
+
+    #[test]
+    fn default_sets_per_monitor_dpi_awareness() {
+        use windows_sys::Win32::UI::HiDpi::{
+            AreDpiAwarenessContextsEqual, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+            GetThreadDpiAwarenessContext,
+        };
+        let _ = SendInputBackend::default();
+        // SAFETY: both calls take no pointers; the context handles are
+        // returned by the system or are system constants.
+        let equal = unsafe {
+            AreDpiAwarenessContextsEqual(
+                GetThreadDpiAwarenessContext(),
+                DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+            )
+        };
+        assert_ne!(equal, 0, "Default skipped the DPI awareness setup");
     }
 
     #[test]
