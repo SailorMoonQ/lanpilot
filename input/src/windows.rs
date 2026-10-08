@@ -7,9 +7,10 @@ use crate::{HidUsage, InputBackend, InputError, MediaKey, MouseButton};
 use std::mem::size_of;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY,
-    KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN,
-    MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE,
-    MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL, MOUSEINPUT, SendInput,
+    KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_HWHEEL,
+    MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP,
+    MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_VIRTUALDESK,
+    MOUSEEVENTF_WHEEL, MOUSEINPUT, SendInput,
 };
 
 /// HID usage -> (virtual key, extended flag).
@@ -128,6 +129,70 @@ fn send(inputs: &[INPUT]) -> Result<(), InputError> {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct VirtualDesk {
+    pub left: i32,
+    pub top: i32,
+    pub width: i32,
+    pub height: i32,
+}
+
+pub(crate) fn absolute_target(
+    cursor: (i32, i32),
+    delta: (i32, i32),
+    desk: &VirtualDesk,
+) -> (i32, i32) {
+    let clamp = |v: i32, origin: i32, size: i32| v.clamp(origin, origin + size - 1);
+    (
+        clamp(cursor.0.saturating_add(delta.0), desk.left, desk.width),
+        clamp(cursor.1.saturating_add(delta.1), desk.top, desk.height),
+    )
+}
+
+/// Pixel -> 0..=65535 so that Windows' mapping `origin + n * size / 65536`
+/// (floored) lands exactly on the pixel: n = ceil(offset * 65536 / size).
+pub(crate) fn normalize(p: (i32, i32), desk: &VirtualDesk) -> (i32, i32) {
+    let axis = |v: i32, origin: i32, size: i32| {
+        let offset = (v - origin) as i64;
+        let size = size as i64;
+        ((offset * 65536 + size - 1) / size).clamp(0, 65535) as i32
+    };
+    (
+        axis(p.0, desk.left, desk.width),
+        axis(p.1, desk.top, desk.height),
+    )
+}
+
+fn virtual_desk() -> Option<VirtualDesk> {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
+        SM_YVIRTUALSCREEN,
+    };
+    // SAFETY: GetSystemMetrics has no pointer arguments and no preconditions.
+    let (left, top, width, height) = unsafe {
+        (
+            GetSystemMetrics(SM_XVIRTUALSCREEN),
+            GetSystemMetrics(SM_YVIRTUALSCREEN),
+            GetSystemMetrics(SM_CXVIRTUALSCREEN),
+            GetSystemMetrics(SM_CYVIRTUALSCREEN),
+        )
+    };
+    (width > 1 && height > 1).then_some(VirtualDesk {
+        left,
+        top,
+        width,
+        height,
+    })
+}
+
+fn cursor_pos() -> Option<(i32, i32)> {
+    use windows_sys::Win32::Foundation::POINT;
+    use windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos;
+    let mut p = POINT { x: 0, y: 0 };
+    // SAFETY: `p` is a valid, writable POINT for the duration of the call.
+    (unsafe { GetCursorPos(&mut p) } != 0).then_some((p.x, p.y))
+}
+
 #[derive(Debug, Default)]
 pub struct SendInputBackend {
     wheel: WheelAccumulator,
@@ -135,13 +200,35 @@ pub struct SendInputBackend {
 
 impl SendInputBackend {
     pub fn new() -> Self {
+        use windows_sys::Win32::UI::HiDpi::{
+            DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
+        };
+        // SAFETY: takes a constant context handle and no pointers. Returns
+        // FALSE if awareness was already set, which is fine to ignore. Without
+        // this, GetCursorPos reports virtualized coordinates on scaled displays.
+        unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
         Self::default()
     }
 }
 
 impl InputBackend for SendInputBackend {
     fn move_relative(&mut self, dx: i32, dy: i32) -> Result<(), InputError> {
-        send(&[mouse(dx, dy, 0, MOUSEEVENTF_MOVE)])
+        if dx == 0 && dy == 0 {
+            return Ok(());
+        }
+        match (cursor_pos(), virtual_desk()) {
+            (Some(cursor), Some(desk)) => {
+                let (nx, ny) = normalize(absolute_target(cursor, (dx, dy), &desk), &desk);
+                send(&[mouse(
+                    nx,
+                    ny,
+                    0,
+                    MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK,
+                )])
+            }
+            // Fall back to a relative move (subject to system acceleration).
+            _ => send(&[mouse(dx, dy, 0, MOUSEEVENTF_MOVE)]),
+        }
     }
 
     fn button(&mut self, button: MouseButton, down: bool) -> Result<(), InputError> {
@@ -226,22 +313,78 @@ mod tests {
         assert_eq!(vk_for(0x99), None);
     }
 
+    fn inverse(n: i32, origin: i32, size: i32) -> i32 {
+        origin + ((n as i64 * size as i64) / 65536) as i32
+    }
+
+    #[test]
+    fn normalize_round_trips_every_pixel() {
+        for desk in [
+            VirtualDesk {
+                left: 0,
+                top: 0,
+                width: 1920,
+                height: 1080,
+            },
+            VirtualDesk {
+                left: 0,
+                top: 0,
+                width: 3840,
+                height: 2160,
+            },
+            VirtualDesk {
+                left: -1920,
+                top: -300,
+                width: 5760,
+                height: 1740,
+            },
+            VirtualDesk {
+                left: 0,
+                top: 0,
+                width: 7680,
+                height: 4320,
+            },
+        ] {
+            for x in desk.left..desk.left + desk.width {
+                let (nx, _) = normalize((x, desk.top), &desk);
+                assert!((0..=65535).contains(&nx));
+                assert_eq!(inverse(nx, desk.left, desk.width), x, "x={x} desk={desk:?}");
+            }
+            for y in desk.top..desk.top + desk.height {
+                let (_, ny) = normalize((desk.left, y), &desk);
+                assert!((0..=65535).contains(&ny));
+                assert_eq!(inverse(ny, desk.top, desk.height), y, "y={y} desk={desk:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn target_adds_delta_and_clamps_to_the_desk() {
+        let desk = VirtualDesk {
+            left: -1920,
+            top: 0,
+            width: 3840,
+            height: 1080,
+        };
+        assert_eq!(absolute_target((100, 100), (5, -7), &desk), (105, 93));
+        assert_eq!(absolute_target((1900, 10), (500, 0), &desk), (1919, 10));
+        assert_eq!(absolute_target((-1900, 5), (-500, -50), &desk), (-1920, 0));
+        assert_eq!(
+            absolute_target((0, 0), (i32::MAX, i32::MIN), &desk),
+            (1919, 0)
+        );
+    }
+
     /// Moves the real cursor. Run manually: `cargo test -p lanpilot-input -- --ignored`.
     #[test]
     #[ignore = "moves the real mouse cursor"]
     fn live_move_changes_cursor_position() {
-        use windows_sys::Win32::Foundation::POINT;
-        use windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos;
-        let pos = || {
-            let mut p = POINT { x: 0, y: 0 };
-            // SAFETY: `p` is a valid, writable POINT for the duration of the call.
-            unsafe { GetCursorPos(&mut p) };
-            p.x
-        };
         let mut b = SendInputBackend::new();
         b.move_relative(-50, 0).unwrap();
-        let before = pos();
-        b.move_relative(20, 0).unwrap();
-        assert!(pos() > before, "cursor did not move right");
+        let before = cursor_pos().expect("GetCursorPos failed");
+        b.move_relative(37, 0).unwrap();
+        let after = cursor_pos().expect("GetCursorPos failed");
+        assert_eq!(after.0 - before.0, 37, "x displacement not exact");
+        assert_eq!(after.1, before.1, "y changed");
     }
 }
