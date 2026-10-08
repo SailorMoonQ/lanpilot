@@ -1,0 +1,36 @@
+[package]
+name = "lanpilot-core"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+base64 = "0.22"
+prost = "0.13"
+ed25519-dalek = { version = "2", features = ["rand_core", "pkcs8", "alloc"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
+sha2 = "0.10"
+hex = "0.4"
+rcgen = "0.13"
+x509-parser = "0.16"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging"] }
+quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring", "log"] }
+thiserror = "2"
+mdns-sd = "0.13"
+spake2 = "0.4"
+hmac = "0.12"
+unicode-normalization = "0.1"
+zeroize = "1"
+tokio = { version = "1", features = ["io-util", "rt", "macros", "net", "time", "sync"] }
+
+[build-dependencies]
+prost-build = "0.13"
+protox = "0.7"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
+proptest = "1"
