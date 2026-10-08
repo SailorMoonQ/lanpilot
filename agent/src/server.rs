@@ -175,6 +175,12 @@ impl Agent {
                 {
                     Ok(Ok(Some(d))) => tracing::debug!("{who}: paired as {}", d.name),
                     Ok(Ok(None)) => tracing::info!("{who}: pairing rejected"),
+                    // An error or timeout can also come after `approve()`,
+                    // when only the result delivery failed (core's
+                    // "uncertain" case). The device then stays paired on
+                    // purpose: the token or SPAKE2 check passed, so only a
+                    // holder of the secret got this far. The phone can still
+                    // connect, or be removed with `devices remove`.
                     Ok(Err(e)) => tracing::debug!("{who}: pairing failed: {e}"),
                     Err(_) => tracing::debug!("{who}: pairing timed out"),
                 }
