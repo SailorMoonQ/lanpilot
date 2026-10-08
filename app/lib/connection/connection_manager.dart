@@ -98,7 +98,11 @@ class ConnectionManager {
   /// Connects to `server`. Fresh connects (start, switch, resume, network
   /// change) wait up to `mdnsWait` for Bonjour; retries and reconnects after
   /// a drop use what is already known so they are not delayed.
+  ///
+  /// In the background nothing connects (spec 4.3): `server` becomes the
+  /// computer that `onResumed` connects to.
   Future<void> connectTo(PairedServer server, {bool waitForMdns = true}) async {
+    if (_paused) return _holdForResume(server);
     final attempt = ++_attempt;
     _inFlight = attempt;
     _retryTimer?.cancel();
@@ -140,10 +144,7 @@ class ConnectionManager {
       if (attempt != _attempt) return;
       _retryCount = 0;
       _switcherTimer?.cancel();
-      final stored = await _store.markUsed(
-        server.shortId,
-        goodAddr: session.addr,
-      );
+      final stored = await _markUsed(server.shortId, goodAddr: session.addr);
       if (attempt != _attempt) return;
       if (stored == null) {
         // Forgotten while connecting: do not stay connected to it.
@@ -228,17 +229,51 @@ class ConnectionManager {
     final attempt = ++_attempt;
     _retryTimer?.cancel();
     _switcherTimer?.cancel();
-    await _store.remove(server.shortId);
+    await _remove(server.shortId);
     if (attempt != _attempt) return;
     if (removedByComputer) {
       _set(_failed(server, FailReason.removedByComputer));
       return;
     }
+    await _connectLastUsed();
+  }
+
+  /// In the background: `onResumed` connects to `server`. A connect still in
+  /// flight from before the pause ends here, since the bridge runs this
+  /// disconnect after it.
+  Future<void> _holdForResume(PairedServer server) async {
+    _set(ConnState(status: ConnStatus.reconnecting, server: server));
+    await _client.disconnect();
+  }
+
+  Future<void> _connectLastUsed() async {
     final next = _store.lastUsed;
     if (next == null) {
       _set(const ConnState(status: ConnStatus.unpaired));
     } else {
       await connectTo(next);
+    }
+  }
+
+  /// `ServerStore.markUsed`, surviving a failed write: the list in memory is
+  /// already updated then, and losing the recency on disk must not leave the
+  /// state stuck on connecting. Null still means the computer was forgotten.
+  Future<PairedServer?> _markUsed(String shortId, {String? goodAddr}) async {
+    try {
+      return await _store.markUsed(shortId, goodAddr: goodAddr);
+    } on Object catch (e) {
+      debugPrint('LanPilot: could not save the paired computers: $e');
+      return _store.byId(shortId);
+    }
+  }
+
+  /// `ServerStore.remove`, surviving a failed write: the computer is gone
+  /// from the list in memory either way.
+  Future<void> _remove(String shortId) async {
+    try {
+      await _store.remove(shortId);
+    } on Object catch (e) {
+      debugPrint('LanPilot: could not save the paired computers: $e');
     }
   }
 
@@ -292,9 +327,12 @@ class ConnectionManager {
     final attempt = ++_attempt;
     _retryTimer?.cancel();
     _switcherTimer?.cancel();
-    final current = state.value;
     await input.releaseAll();
+    // A resume (or a switch) took over while buttons were released: its
+    // session must stay up.
+    if (attempt != _attempt) return;
     await _client.disconnect();
+    final current = state.value;
     if (attempt != _attempt || current.server == null) return;
     final settled =
         current.status == ConnStatus.failed &&
@@ -328,7 +366,7 @@ class ConnectionManager {
   }
 
   Future<void> switchTo(PairedServer server) async {
-    _attempt++;
+    final attempt = ++_attempt;
     _retryTimer?.cancel();
     _switcherTimer?.cancel();
     _retryCount = 0;
@@ -337,7 +375,14 @@ class ConnectionManager {
       _set(state.value.copyWith(clearSession: true));
       await _client.disconnect();
     }
-    final stored = await _store.markUsed(server.shortId) ?? server;
+    final stored = await _markUsed(server.shortId);
+    if (stored == null) {
+      // Forgotten meanwhile: never connect to it. If nothing else took over,
+      // settle on the most recent computer left.
+      if (attempt == _attempt) await _connectLastUsed();
+      return;
+    }
+    if (_paused) return _holdForResume(stored);
     _set(ConnState(status: ConnStatus.connecting, server: stored));
     await connectTo(stored);
   }

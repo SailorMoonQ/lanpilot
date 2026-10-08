@@ -136,8 +136,13 @@ class FakeLanPilotClient implements LanPilotClient {
       calls.add('scroll ${dx.toStringAsFixed(2)},${dy.toStringAsFixed(2)}');
 
   @override
-  Future<void> button(MouseButtonKind button, {required bool down}) =>
-      _request('button ${button.name} ${down ? 'down' : 'up'}');
+  Future<void> button(MouseButtonKind button, {required bool down}) async {
+    await _request('button ${button.name} ${down ? 'down' : 'up'}');
+    await buttonGate?.future;
+  }
+
+  /// When set, button completes only after this does.
+  Completer<void>? buttonGate;
 
   @override
   Future<void> keyChord(List<int> usages) => _request('keyChord $usages');

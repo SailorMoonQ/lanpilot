@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:lanpilot/storage/json_store.dart';
 import 'package:lanpilot/storage/secret_store.dart';
@@ -15,6 +16,20 @@ class MemoryJsonStore implements JsonStore {
   @override
   Future<void> write(Map<String, Object?> data) async =>
       text = jsonEncode(data);
+}
+
+/// A MemoryJsonStore whose writes throw while [failWrites] is set, like a
+/// full disk.
+class FailingJsonStore extends MemoryJsonStore {
+  FailingJsonStore([super.text]);
+
+  bool failWrites = false;
+
+  @override
+  Future<void> write(Map<String, Object?> data) async {
+    if (failWrites) throw const FileSystemException('disk full');
+    await super.write(data);
+  }
 }
 
 class MemorySecretStore implements SecretStore {

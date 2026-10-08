@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:fake_async/fake_async.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:lanpilot/bridge/lanpilot_client.dart';
 import 'package:lanpilot/connection/conn_state.dart';
@@ -32,14 +33,14 @@ PairedServer serverB() => PairedServer(
 
 class Rig {
   Rig({bool everConnected = true})
-    : json = MemoryJsonStore(
+    : json = FailingJsonStore(
         '{"everConnected": $everConnected, "servers": []}',
       );
 
   final client = FakeLanPilotClient();
   final discovery = FakeDiscovery();
   final secrets = MemorySecretStore();
-  final MemoryJsonStore json;
+  final FailingJsonStore json;
   var _clock = DateTime.utc(2026, 10, 8);
   late final store = ServerStore(
     json,
@@ -518,6 +519,193 @@ void main() {
       expect(r.client.calls, isNot(contains('resetEndpoint')));
       expect(r.connects, hasLength(2));
       expect(r.state.reason, FailReason.offline);
+    });
+  });
+
+  test('addPaired while paused waits for resume, then connects to it', () {
+    fakeAsync((async) {
+      final r = Rig()..seed(async, [serverA()]);
+      r.start(async);
+      r.manager.onPaused();
+      async.flushMicrotasks();
+      r.manager.addPaired(fakeServerInfo(shortId: idB, name: 'B'));
+      async.elapse(const Duration(seconds: 30));
+      expect(r.connects, hasLength(1));
+      expect(r.state.status, ConnStatus.reconnecting);
+      expect(r.state.server!.shortId, idB);
+      r.manager.onResumed();
+      async.elapse(const Duration(seconds: 2));
+      expect(r.connects, hasLength(2));
+      expect(r.state.status, ConnStatus.connected);
+      expect(r.state.server!.shortId, idB);
+    });
+  });
+
+  test('a switch racing a pause does not connect until resume', () {
+    fakeAsync((async) {
+      final r = Rig()..seed(async, [serverA(), serverB()]);
+      r.start(async);
+      r.manager.switchTo(serverB());
+      r.manager.onPaused();
+      async.elapse(const Duration(seconds: 30));
+      expect(r.connects, hasLength(1));
+      expect(r.state.server!.shortId, idB);
+      r.manager.onResumed();
+      async.elapse(const Duration(seconds: 2));
+      expect(r.connects, ['connect 10.0.0.1:45810', 'connect 10.0.0.2:45810']);
+      expect(r.state.status, ConnStatus.connected);
+      expect(r.state.server!.shortId, idB);
+    });
+  });
+
+  test('forgetting a computer while paused waits for resume to move on', () {
+    fakeAsync((async) {
+      final r = Rig()..seed(async, [serverA(), serverB()]);
+      r.start(async);
+      r.manager.input.button(MouseButtonKind.left, down: true);
+      async.flushMicrotasks();
+      final gate = Completer<void>();
+      r.client.buttonGate = gate;
+      r.manager.onPaused();
+      async.flushMicrotasks();
+      // The session is still recorded while the release is in flight.
+      r.client.closeSession(1, CloseReason.unpaired);
+      async.flushMicrotasks();
+      gate.complete();
+      async.elapse(const Duration(seconds: 30));
+      expect(r.store.byId(idA), isNull);
+      expect(r.connects, hasLength(1));
+      expect(r.state.status, ConnStatus.reconnecting);
+      expect(r.state.server!.shortId, idB);
+      r.manager.onResumed();
+      async.elapse(const Duration(seconds: 2));
+      expect(r.connects, ['connect 10.0.0.1:45810', 'connect 10.0.0.2:45810']);
+      expect(r.state.status, ConnStatus.connected);
+      expect(r.state.server!.shortId, idB);
+    });
+  });
+
+  test('removal by the computer while paused connects nowhere', () {
+    fakeAsync((async) {
+      final r = Rig()..seed(async, [serverA(), serverB()]);
+      r.start(async);
+      r.manager.input.button(MouseButtonKind.left, down: true);
+      async.flushMicrotasks();
+      final gate = Completer<void>();
+      r.client.buttonGate = gate;
+      r.manager.onPaused();
+      async.flushMicrotasks();
+      r.client.closeSession(1, CloseReason.deviceRemoved);
+      async.flushMicrotasks();
+      gate.complete();
+      r.manager.onResumed();
+      async.elapse(const Duration(seconds: 30));
+      expect(r.connects, hasLength(1));
+      expect(r.state.reason, FailReason.removedByComputer);
+    });
+  });
+
+  test('a switch while paused ends a connect still in flight', () {
+    fakeAsync((async) {
+      final r = Rig()..seed(async, [serverA(), serverB()]);
+      final pending = Completer<SessionInfo>();
+      r.client.connectResults.add(pending);
+      r.start(async);
+      r.manager.onPaused();
+      r.manager.switchTo(serverB());
+      async.flushMicrotasks();
+      pending.complete(fakeSession(1));
+      async.elapse(const Duration(seconds: 30));
+      expect(r.client.calls.last, 'disconnect');
+      expect(r.connects, hasLength(1));
+      expect(r.state.status, ConnStatus.reconnecting);
+      expect(r.state.server!.shortId, idB);
+    });
+  });
+
+  test('a pause that finishes after resume keeps the new session', () {
+    fakeAsync((async) {
+      final r = Rig()..seed(async, [serverA()]);
+      r.start(async);
+      r.manager.input.button(MouseButtonKind.left, down: true);
+      async.flushMicrotasks();
+      final gate = Completer<void>();
+      r.client.buttonGate = gate;
+      r.manager.onPaused();
+      async.flushMicrotasks();
+      r.manager.onResumed();
+      async.elapse(const Duration(seconds: 2));
+      expect(r.connects, hasLength(2));
+      expect(r.state.status, ConnStatus.connected);
+      final afterConnect = r.client.calls.length;
+      gate.complete();
+      async.elapse(const Duration(seconds: 2));
+      expect(r.client.calls.skip(afterConnect), isNot(contains('disconnect')));
+      expect(r.state.status, ConnStatus.connected);
+      expect(r.state.session!.generation, 2);
+    });
+  });
+
+  test('switching to a computer forgotten meanwhile never connects to it', () {
+    fakeAsync((async) {
+      final r = Rig()..seed(async, [serverA(), serverB()]);
+      r.start(async);
+      r.manager.switchTo(serverB());
+      r.manager.unpair(serverB());
+      async.elapse(const Duration(seconds: 30));
+      expect(r.store.byId(idB), isNull);
+      expect(r.connects, isNot(contains('connect 10.0.0.2:45810')));
+      expect(r.state.status, ConnStatus.connected);
+      expect(r.state.server!.shortId, idA);
+    });
+  });
+
+  group('when the store cannot be written', () {
+    late List<String?> logged;
+    late DebugPrintCallback original;
+    setUp(() {
+      logged = [];
+      original = debugPrint;
+      debugPrint = (message, {wrapWidth}) => logged.add(message);
+    });
+    tearDown(() => debugPrint = original);
+
+    test('a connect still ends connected', () {
+      fakeAsync((async) {
+        final r = Rig()..seed(async, [serverA()]);
+        r.json.failWrites = true;
+        r.start(async);
+        expect(r.state.status, ConnStatus.connected);
+        expect(r.state.session!.generation, 1);
+        expect(r.state.server!.lastGoodAddr, '192.168.1.10:45810');
+        expect(logged, isNotEmpty);
+      });
+    });
+
+    test('forgetting a computer still moves on to the next one', () {
+      fakeAsync((async) {
+        final r = Rig()..seed(async, [serverA(), serverB()]);
+        r.start(async);
+        r.json.failWrites = true;
+        r.client.closeSession(1, CloseReason.unpaired);
+        async.elapse(const Duration(seconds: 2));
+        expect(r.store.byId(idA), isNull);
+        expect(r.state.status, ConnStatus.connected);
+        expect(r.state.server!.shortId, idB);
+        expect(logged, isNotEmpty);
+      });
+    });
+
+    test('a switch still connects to the chosen computer', () {
+      fakeAsync((async) {
+        final r = Rig()..seed(async, [serverA(), serverB()]);
+        r.start(async);
+        r.json.failWrites = true;
+        r.manager.switchTo(serverB());
+        async.elapse(const Duration(seconds: 2));
+        expect(r.state.status, ConnStatus.connected);
+        expect(r.state.server!.shortId, idB);
+      });
     });
   });
 
