@@ -7,6 +7,9 @@
 
 mod keys;
 pub mod recording;
+pub mod wheel;
+#[cfg(windows)]
+pub mod windows;
 
 pub use keys::{HidUsage, SUPPORTED_KEYS, usage_from_name};
 
@@ -50,7 +53,14 @@ pub trait InputBackend: Send {
 
 /// The real backend for this platform.
 pub fn open_default() -> Result<Box<dyn InputBackend>, InputError> {
-    Err(InputError::Unsupported(
-        "no input backend for this platform",
-    ))
+    #[cfg(windows)]
+    {
+        Ok(Box::new(windows::SendInputBackend::new()))
+    }
+    #[cfg(not(windows))]
+    {
+        Err(InputError::Unsupported(
+            "no input backend for this platform",
+        ))
+    }
 }
