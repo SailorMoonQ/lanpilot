@@ -8,11 +8,14 @@ use lanpilot_agent::pairing::{lan_ipv4_addrs, render_qr};
 use lanpilot_agent::paths::Paths;
 use lanpilot_agent::secret::{clear_password, store_password};
 use lanpilot_agent::server::Agent;
+use lanpilot_core::discovery::Advertiser;
 use lanpilot_core::pairing::tokens::TOKEN_TTL;
 use lanpilot_input::InputBackend;
 use lanpilot_input::logging::LoggingBackend;
-use std::net::SocketAddr;
+use std::collections::BTreeSet;
+use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
+use std::time::Duration;
 
 #[derive(Parser)]
 #[command(name = "lanpilot-agent", version, about = "LanPilot PC agent")]
@@ -156,15 +159,8 @@ fn run(paths: &Paths, pair: bool, mock_input: bool) -> Result<(), AgentError> {
         let agent = Agent::new(paths, input)?;
         let port = agent.config().general.port;
         let endpoint = agent.bind(SocketAddr::from(([0, 0, 0, 0], port)))?;
-        let _advertiser = match agent.advertise(port) {
-            Ok(a) => Some(a),
-            Err(e) => {
-                tracing::warn!(
-                    "mDNS advertising failed, phones must use the QR code or the IP: {e}"
-                );
-                None
-            }
-        };
+        let mut addrs = lan_ipv4_addrs();
+        let mut advertiser = start_advertiser(&agent, port, addrs.clone());
         tracing::info!(
             "LanPilot agent \"{}\" ({}) listening on UDP {port}",
             agent.config().general.name,
@@ -186,18 +182,165 @@ fn run(paths: &Paths, pair: bool, mock_input: bool) -> Result<(), AgentError> {
             });
         }
         let serving = tokio::spawn(agent.clone().serve(endpoint.clone()));
-        tokio::signal::ctrl_c().await?;
+        let mut refresh = tokio::time::interval(ADVERTISE_REFRESH);
+        refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        refresh.tick().await;
+        let signal = shutdown_signal()?;
+        tokio::pin!(signal);
+        loop {
+            tokio::select! {
+                name = &mut signal => {
+                    tracing::info!("{name} received");
+                    break;
+                }
+                _ = refresh.tick() => {
+                    let latest = lan_ipv4_addrs();
+                    if addrs_changed(&addrs, &latest) {
+                        tracing::info!(
+                            "LAN addresses changed from {addrs:?} to {latest:?}, re-advertising"
+                        );
+                        if let Some(old) = advertiser.take() {
+                            old.stop().await;
+                        }
+                        advertiser = start_advertiser(&agent, port, latest.clone());
+                        addrs = latest;
+                    }
+                }
+            }
+        }
         tracing::info!("shutting down");
+        if let Some(advertiser) = advertiser.take() {
+            advertiser.stop().await;
+        }
         agent.shutdown(&endpoint).await;
         serving.abort();
         Ok::<(), AgentError>(())
     })
 }
 
+/// Installs handlers for every graceful exit signal now (so none is missed)
+/// and returns a future that resolves with the name of the first to arrive.
+/// Must be called inside the runtime.
+#[cfg(unix)]
+fn shutdown_signal() -> std::io::Result<impl Future<Output = &'static str>> {
+    use tokio::signal::unix::{SignalKind, signal};
+    let mut interrupt = signal(SignalKind::interrupt())?;
+    let mut terminate = signal(SignalKind::terminate())?;
+    let mut hangup = signal(SignalKind::hangup())?;
+    Ok(async move {
+        tokio::select! {
+            _ = interrupt.recv() => "Ctrl-C",
+            _ = terminate.recv() => "SIGTERM",
+            _ = hangup.recv() => "SIGHUP",
+        }
+    })
+}
+
+/// Installs handlers for every graceful exit signal now (so none is missed)
+/// and returns a future that resolves with the name of the first to arrive.
+/// Must be called inside the runtime. For close, logoff and shutdown, tokio
+/// keeps the handler blocked so the process lives until it exits on its own
+/// or Windows kills it (about 5 s), long enough to send the mDNS goodbye.
+#[cfg(windows)]
+fn shutdown_signal() -> std::io::Result<impl Future<Output = &'static str>> {
+    use tokio::signal::windows;
+    let mut ctrl_c = windows::ctrl_c()?;
+    let mut ctrl_break = windows::ctrl_break()?;
+    let mut close = windows::ctrl_close()?;
+    let mut logoff = windows::ctrl_logoff()?;
+    let mut shutdown = windows::ctrl_shutdown()?;
+    Ok(async move {
+        tokio::select! {
+            _ = ctrl_c.recv() => "Ctrl-C",
+            _ = ctrl_break.recv() => "Ctrl-Break",
+            _ = close.recv() => "console close",
+            _ = logoff.recv() => "logoff",
+            _ = shutdown.recv() => "system shutdown",
+        }
+    })
+}
+
+/// How often the agent checks whether its LAN addresses changed.
+const ADVERTISE_REFRESH: Duration = Duration::from_secs(30);
+
+/// Starts mDNS on `addrs`; a failure is logged, not fatal. With no addresses
+/// nothing is advertised until the refresh sees one appear.
+fn start_advertiser(agent: &Agent, port: u16, addrs: Vec<IpAddr>) -> Option<Advertiser> {
+    match agent.advertise(port, addrs.clone()) {
+        Ok(a) => {
+            if a.is_some() {
+                tracing::info!("mDNS advertising on {addrs:?}");
+            }
+            a
+        }
+        Err(e) => {
+            tracing::warn!("mDNS advertising failed, phones must use the QR code or the IP: {e}");
+            None
+        }
+    }
+}
+
+/// Whether two address lists differ as sets.
+fn addrs_changed(current: &[IpAddr], latest: &[IpAddr]) -> bool {
+    let set = |a: &[IpAddr]| a.iter().copied().collect::<BTreeSet<IpAddr>>();
+    set(current) != set(latest)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Cli, Command};
+    use super::{Cli, Command, addrs_changed, shutdown_signal};
     use clap::{CommandFactory, Parser};
+    use std::net::IpAddr;
+    use std::time::Duration;
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn shutdown_signal_registers_and_stays_pending() {
+        let signal = shutdown_signal().unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), signal)
+                .await
+                .is_err()
+        );
+    }
+
+    /// The only test in this binary that installs signal handlers on unix:
+    /// tokio's signal registry is process-global, so a second test would
+    /// see this SIGTERM (or deliver one into this test's pending window).
+    /// The handlers are installed before the kill, so SIGTERM cannot take
+    /// the test process down. Runs in the Ubuntu CI job.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shutdown_signal_stays_pending_until_sigterm() {
+        let signal = shutdown_signal().unwrap();
+        tokio::pin!(signal);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut signal)
+                .await
+                .is_err()
+        );
+        let status = std::process::Command::new("kill")
+            .args(["-TERM", &std::process::id().to_string()])
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let name = tokio::time::timeout(Duration::from_secs(5), signal)
+            .await
+            .expect("SIGTERM observed within 5 s");
+        assert_eq!(name, "SIGTERM");
+    }
+
+    #[test]
+    fn addrs_change_is_a_set_comparison() {
+        let a: IpAddr = "192.168.50.203".parse().unwrap();
+        let b: IpAddr = "10.0.0.7".parse().unwrap();
+        assert!(!addrs_changed(&[a, b], &[b, a]));
+        assert!(!addrs_changed(&[a], &[a, a]));
+        assert!(addrs_changed(&[a], &[a, b]));
+        assert!(addrs_changed(&[a], &[]));
+        assert!(addrs_changed(&[], &[b]));
+        assert!(!addrs_changed(&[], &[]));
+    }
 
     #[test]
     fn cli_definition_is_valid() {

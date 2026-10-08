@@ -809,6 +809,7 @@ dependencies = [
  "ed25519-dalek",
  "hex",
  "hmac",
+ "if-addrs",
  "mdns-sd",
  "proptest",
  "prost",

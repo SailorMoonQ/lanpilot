@@ -89,16 +89,38 @@ impl Agent {
         self.pairing.issue_invite(self.public_key(), port, addrs)
     }
 
-    pub fn advertise(&self, port: u16) -> Result<Advertiser, AgentError> {
-        Advertiser::start(&Advertisement {
+    /// The mDNS record for this agent, published only on `addrs` (pass
+    /// [`crate::pairing::lan_ipv4_addrs`], the invite addresses).
+    pub fn advertisement(&self, port: u16, addrs: Vec<IpAddr>) -> Advertisement {
+        Advertisement {
             short_id: self.public_key().short_id(),
             name: self.config.general.name.clone(),
             os: current_os(),
             proto_min: PROTO_MIN,
             proto_max: PROTO_MAX,
             port,
-        })
-        .map_err(|e| AgentError::Core(e.to_string()))
+            addrs,
+        }
+    }
+
+    /// Starts advertising [`Self::advertisement`]. Stop it with
+    /// [`Advertiser::stop`] so the goodbye goes out.
+    ///
+    /// With no `addrs` this returns `Ok(None)` and advertises nothing: core's
+    /// auto mode would publish on every interface, virtual adapters included.
+    /// The caller retries once an address appears.
+    pub fn advertise(
+        &self,
+        port: u16,
+        addrs: Vec<IpAddr>,
+    ) -> Result<Option<Advertiser>, AgentError> {
+        if addrs.is_empty() {
+            tracing::warn!("no usable LAN IPv4 address, not advertising over mDNS for now");
+            return Ok(None);
+        }
+        Advertiser::start(&self.advertisement(port, addrs))
+            .map(Some)
+            .map_err(|e| AgentError::Core(e.to_string()))
     }
 
     pub async fn serve(self: Arc<Self>, endpoint: quinn::Endpoint) {
@@ -215,5 +237,32 @@ impl Agent {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lanpilot_input::logging::LoggingBackend;
+
+    #[test]
+    fn advertisement_publishes_the_given_addrs() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent = Agent::new(&Paths::under(dir.path()), Box::new(LoggingBackend::new())).unwrap();
+        let ip: IpAddr = "192.168.50.203".parse().unwrap();
+        let ad = agent.advertisement(45810, vec![ip]);
+        assert_eq!(ad.addrs, vec![ip]);
+        assert_eq!(ad.port, 45810);
+        assert_eq!(ad.short_id, agent.public_key().short_id());
+        assert!(agent.advertisement(45810, vec![]).addrs.is_empty());
+    }
+
+    /// Auto mode would publish on every interface (TUN included), so with no
+    /// usable LAN address the agent does not advertise at all.
+    #[test]
+    fn no_lan_addrs_means_no_advertiser() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent = Agent::new(&Paths::under(dir.path()), Box::new(LoggingBackend::new())).unwrap();
+        assert!(agent.advertise(45810, vec![]).unwrap().is_none());
     }
 }

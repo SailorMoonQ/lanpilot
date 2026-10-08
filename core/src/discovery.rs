@@ -8,9 +8,10 @@
 
 use crate::proto::v1::Os;
 use crate::text::sanitize_display_name;
-use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
+use mdns_sd::{IfKind, ServiceDaemon, ServiceEvent, ServiceInfo};
 use std::collections::HashMap;
 use std::net::IpAddr;
+use std::time::Duration;
 
 pub const SERVICE_TYPE: &str = "_lanpilot._udp.local.";
 
@@ -28,6 +29,11 @@ pub struct Advertisement {
     pub proto_min: u32,
     pub proto_max: u32,
     pub port: u16,
+    /// Addresses to publish. Empty lets mdns-sd choose (every non-loopback
+    /// interface, addresses tracked automatically). Non-empty publishes exactly
+    /// these addresses, and only on the interfaces that own them, so virtual
+    /// adapters (TUN, VPN) never carry the record.
+    pub addrs: Vec<IpAddr>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -166,33 +172,103 @@ impl DiscoveredDevice {
 
 pub struct Advertiser {
     daemon: ServiceDaemon,
-    fullname: String,
+    /// `None` once withdrawn, so `Drop` never unregisters twice.
+    fullname: Option<String>,
 }
 
 impl Advertiser {
-    /// Starts advertising `ad`. The advertised name is sanitized (see [`Advertisement::txt`]).
+    /// Starts advertising `ad`. The advertised name is sanitized (see
+    /// [`Advertisement::txt`]); see [`Advertisement::addrs`] for interface
+    /// selection. Loopback stays disabled (the mdns-sd default).
     pub fn start(ad: &Advertisement) -> Result<Self, DiscoveryError> {
-        let daemon = ServiceDaemon::new()?;
-        let props: HashMap<String, String> = ad.txt().into_iter().collect();
-        let info = ServiceInfo::new(
-            SERVICE_TYPE,
-            &ad.short_id,
-            &format!("{}.local.", ad.short_id),
-            "",
-            ad.port,
-            props,
-        )?
-        .enable_addr_auto();
-        let fullname = info.get_fullname().to_owned();
-        daemon.register(info)?;
-        Ok(Self { daemon, fullname })
+        Self::start_on(ServiceDaemon::new()?, ad)
+    }
+
+    /// [`Self::start`] on an existing daemon, which is shut down on error so
+    /// its thread does not leak.
+    fn start_on(daemon: ServiceDaemon, ad: &Advertisement) -> Result<Self, DiscoveryError> {
+        match register(&daemon, ad) {
+            Ok(fullname) => Ok(Self {
+                daemon,
+                fullname: Some(fullname),
+            }),
+            Err(e) => {
+                let _ = daemon.shutdown();
+                Err(e)
+            }
+        }
+    }
+
+    /// Withdraws the record and stops the daemon, waiting (up to
+    /// [`GOODBYE_TIMEOUT`]) until the goodbye has been sent, plus a short
+    /// pause for mdns-sd's repeated copy, so browsers see the device go away
+    /// promptly. Prefer this over dropping, which cannot wait.
+    pub async fn stop(mut self) {
+        self.withdraw().await;
+        let _ = self.daemon.shutdown();
+    }
+
+    /// Unregisters (once) and waits for both goodbye copies.
+    async fn withdraw(&mut self) {
+        let Some(fullname) = self.fullname.take() else {
+            return;
+        };
+        if let Ok(status) = self.daemon.unregister(&fullname)
+            && let Ok(Ok(_)) = tokio::time::timeout(GOODBYE_TIMEOUT, status.recv_async()).await
+        {
+            tokio::time::sleep(GOODBYE_RESEND_WAIT).await;
+        }
     }
 }
 
+/// How long [`Advertiser::stop`] waits, after the first goodbye, for
+/// mdns-sd's second copy (sent 120 ms after the first).
+const GOODBYE_RESEND_WAIT: Duration = Duration::from_millis(150);
+
+/// Selects the interfaces for `ad` and registers it; returns the fullname.
+fn register(daemon: &ServiceDaemon, ad: &Advertisement) -> Result<String, DiscoveryError> {
+    let info = service_info(ad)?;
+    if !ad.addrs.is_empty() {
+        daemon.disable_interface(IfKind::All)?;
+        for ip in &ad.addrs {
+            daemon.enable_interface(IfKind::Addr(*ip))?;
+        }
+    }
+    let fullname = info.get_fullname().to_owned();
+    daemon.register(info)?;
+    Ok(fullname)
+}
+
+/// How long [`Advertiser::stop`] waits for the daemon to send the goodbye.
+pub const GOODBYE_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// The service record for `ad`: exactly `ad.addrs` when non-empty, otherwise
+/// no addresses and mdns-sd's automatic address tracking.
+fn service_info(ad: &Advertisement) -> Result<ServiceInfo, DiscoveryError> {
+    let props: HashMap<String, String> = ad.txt().into_iter().collect();
+    let info = ServiceInfo::new(
+        SERVICE_TYPE,
+        &ad.short_id,
+        &format!("{}.local.", ad.short_id),
+        ad.addrs.as_slice(),
+        ad.port,
+        props,
+    )?;
+    Ok(if ad.addrs.is_empty() {
+        info.enable_addr_auto()
+    } else {
+        info
+    })
+}
+
+/// Best effort for panics and early returns: the goodbye is queued but not
+/// awaited. Does nothing after [`Advertiser::stop`].
 impl Drop for Advertiser {
     fn drop(&mut self) {
-        let _ = self.daemon.unregister(&self.fullname);
-        let _ = self.daemon.shutdown();
+        if let Some(fullname) = self.fullname.take() {
+            let _ = self.daemon.unregister(&fullname);
+            let _ = self.daemon.shutdown();
+        }
     }
 }
 
@@ -258,7 +334,96 @@ mod tests {
             proto_min: 1,
             proto_max: 2,
             port: 45810,
+            addrs: vec![],
         }
+    }
+
+    #[test]
+    fn explicit_addrs_are_published_exactly() {
+        let a: IpAddr = "192.168.50.203".parse().unwrap();
+        let b: IpAddr = "10.0.0.7".parse().unwrap();
+        let mut ad = ad();
+        ad.addrs = vec![a, b];
+        let info = service_info(&ad).unwrap();
+        assert!(!info.is_addr_auto());
+        let got: std::collections::HashSet<IpAddr> = info.get_addresses().clone();
+        assert_eq!(got, [a, b].into_iter().collect());
+        assert_eq!(
+            info.get_fullname(),
+            "0123456789abcdef._lanpilot._udp.local."
+        );
+        assert_eq!(info.get_port(), 45810);
+    }
+
+    #[test]
+    fn failed_start_shuts_the_daemon_down() {
+        let daemon = ServiceDaemon::new().unwrap();
+        let mut bad = ad();
+        // "<id>.local." over 255 bytes: register() rejects the hostname.
+        bad.short_id = "a".repeat(250);
+        bad.addrs = vec!["192.168.50.203".parse().unwrap()];
+        assert!(Advertiser::start_on(daemon.clone(), &bad).is_err());
+        // A status query racing the exit is dropped unanswered; once the
+        // daemon thread is gone, status() answers Shutdown directly.
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            let status = daemon
+                .status()
+                .unwrap()
+                .recv_timeout(Duration::from_millis(100));
+            if matches!(status, Ok(mdns_sd::DaemonStatus::Shutdown)) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "daemon still running: {status:?}"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// mdns-sd queues a second goodbye copy 120 ms after the first;
+    /// shutting the daemon down sooner drops it.
+    #[tokio::test]
+    #[ignore = "needs working local multicast; run with --ignored"]
+    async fn withdraw_lets_the_second_goodbye_go_out() {
+        let mut a = ad();
+        a.short_id = "c0ffee00c0ffee00".into();
+        a.port = 45997;
+        let mut browser = Browser::start().unwrap();
+        let mut advertiser = Advertiser::start(&a).unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if let Some(DiscoveryEvent::Found(d)) = browser.next().await
+                    && d.short_id == a.short_id
+                {
+                    return;
+                }
+            }
+        })
+        .await
+        .expect("announced within 10 s");
+
+        advertiser.withdraw().await;
+        let metrics = advertiser
+            .daemon
+            .get_metrics()
+            .unwrap()
+            .recv_async()
+            .await
+            .unwrap();
+        advertiser.stop().await;
+        assert!(
+            metrics.get("unregister-resend").copied().unwrap_or(0) >= 1,
+            "{metrics:?}"
+        );
+    }
+
+    #[test]
+    fn empty_addrs_keep_auto_mode() {
+        let info = service_info(&ad()).unwrap();
+        assert!(info.is_addr_auto());
+        assert!(info.get_addresses().is_empty());
     }
 
     #[test]
