@@ -30,7 +30,7 @@ Run before calling M2 done, with the user at the iPhone. Record the date, device
 2. System camera: scan the PC's QR code with the iOS Camera app and tap the `lanpilot://` banner. LanPilot opens and pairs.
 3. Paste: copy the `lanpilot://pair?d=...` line (Universal Clipboard from the Mac is fine), tap the paste icon, then Pair.
 4. Paste junk ("hello"): "This is not a LanPilot pairing link."
-5. Paste a pairing link or scan a QR code older than 2 minutes (e.g. an earlier one in the terminal scrollback): "The pairing code expired..." In the scanner, an expired QR code shows a Retry button appears and the scanner does not loop on the same code.
+5. Paste a pairing link or scan a QR code older than 2 minutes (e.g. an earlier one in the terminal scrollback): "The pairing code expired..." In the scanner, an expired QR code shows a Retry button, and the scanner does not loop on the same code.
 6. Password: on the PC `lanpilot-agent password set`, restart the agent. Tap the PC under "Nearby computers", enter the password. Then a wrong password: "Wrong password." Press the keyboard Done twice quickly on the password field: only one pairing starts (the PC counts one attempt, not two).
 7. Manual IP: "Enter IP address", type the PC's IP (no port) and the password. It pairs.
 8. The PC's device list (`lanpilot-agent devices list`) shows "iPhone" with OS `Ios` (Debug format) after each pairing.
@@ -45,9 +45,10 @@ Run before calling M2 done, with the user at the iPhone. Record the date, device
 6. Two PCs: pair both, switch with the switcher (top name), check the online and offline labels and the check mark.
 7. Unpair by swiping left in the switcher; a confirm dialog offers Unpair and Cancel. After confirming, the PC's device list no longer has the phone. Do this on the computer you are currently connected to as well: it works without a glitch.
    Open the switcher right after launch on a slow start: it opens only once.
-8. Stop the PC agent without Ctrl-C (kill it or crash it): the phone may still list it as nearby for a while. This is a stale Bonjour record; the agent side is being fixed in the Windows session.
-9. Sleep: the screen stays awake only on the touchpad tab. On the Media and Shortcuts tabs and under Settings, auto-lock lets the screen sleep.
+8. Stop the PC agent with Ctrl-C (or SIGTERM or SIGHUP on Linux; on Windows also close its console window, log off or shut down): the PC leaves "Nearby computers" at once, because the agent sends a Bonjour goodbye. Only a hard kill (Task Manager "End task", `kill -9`) or a crash leaves a stale nearby entry, which disappears after a while.
+9. Sleep: the screen stays awake only on the touchpad tab, and only while the PC is connected or being reached. On the Media and Shortcuts tabs and under Settings, auto-lock lets the screen sleep. Leave the phone on the touchpad and put the PC to sleep: once the overlay says the PC is offline, auto-lock lets the phone sleep too.
 10. On the PC `lanpilot-agent devices remove <id>`: the phone shows "This computer removed this device. Pair again."
+11. Wrong address while connected: while connected to a PC, open "Add computer", choose "Enter IP address" and type an IP where no PC runs (e.g. an unused address on your subnet) with any password. After the "Cannot reach the computer" error, go back: the touchpad still controls the connected PC (move the cursor, click).
 
 ## Touchpad (spec 5)
 
