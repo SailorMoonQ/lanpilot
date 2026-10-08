@@ -356,4 +356,47 @@ void main() {
     m.pointerMove(1, const Offset(20, 0), ms(170));
     expect(sink.actions, ['move 10,0', 'move 10,0']);
   });
+
+  test('a staggered two-finger tap does not left click', () {
+    fakeAsync((async) {
+      setUpMachine();
+      m.pointerDown(1, Offset.zero, ms(0));
+      m.pointerDown(2, const Offset(50, 0), ms(120));
+      m.pointerUp(1, ms(160));
+      m.pointerUp(2, ms(200));
+      async.elapse(ms(500));
+      expect(sink.actions, isEmpty);
+    });
+  });
+
+  test('a three-finger tap with one sliding finger does not left click', () {
+    fakeAsync((async) {
+      setUpMachine();
+      m.pointerDown(1, Offset.zero, ms(0));
+      m.pointerDown(2, const Offset(40, 0), ms(20));
+      m.pointerDown(3, const Offset(80, 0), ms(40));
+      m.pointerMove(2, const Offset(40, 10), ms(60));
+      m.pointerUp(2, ms(90));
+      m.pointerUp(1, ms(100));
+      m.pointerUp(3, ms(150));
+      async.elapse(ms(500));
+      expect(sink.actions, isEmpty);
+    });
+  });
+
+  test(
+    'resting two fingers then lifting one leaves the other free to move',
+    () {
+      fakeAsync((async) {
+        setUpMachine();
+        m.pointerDown(1, Offset.zero, ms(0));
+        m.pointerDown(2, const Offset(50, 0), ms(10));
+        m.pointerUp(1, ms(400));
+        m.pointerMove(2, const Offset(60, 0), ms(420));
+        m.pointerUp(2, ms(900));
+        async.elapse(ms(500));
+        expect(sink.actions, ['move 10,0']);
+      });
+    },
+  );
 }

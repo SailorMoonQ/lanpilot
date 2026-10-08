@@ -169,7 +169,7 @@ class GestureMachine {
         time - f.downAt < Tuning.tapMaxDuration && f.travel < Tuning.tapMaxMove;
     switch (_phase) {
       case _Phase.touch || _Phase.moving:
-        if (quick) {
+        if (quick && _maxFingers == 1) {
           _startTapWait();
         } else {
           _phase = _Phase.idle;
@@ -187,7 +187,8 @@ class GestureMachine {
         }
       case _Phase.multi:
         if (f.travel >= Tuning.tapMaxMove) _tapPossible = false;
-        if (_fingers.length == 1 && !_tapPossible) {
+        final tapOver = time - _firstDown > Tuning.multiUpWindow;
+        if (_fingers.length == 1 && (!_tapPossible || tapOver)) {
           // A brief extra touch ended: the remaining finger moves the pointer.
           _primary = _fingers.keys.first;
           _phase = _Phase.moving;
