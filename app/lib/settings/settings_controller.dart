@@ -13,6 +13,11 @@ class SettingsController extends ValueNotifier<Settings> {
   /// Applies `change` at once (the UI updates immediately) and persists it.
   Future<void> update(Settings Function(Settings) change) async {
     value = change(value);
-    await _json.write(value.toJson());
+    try {
+      await _json.write(value.toJson());
+    } on Object catch (e) {
+      // The new value stays in memory; only persistence failed.
+      debugPrint('settings write failed: $e');
+    }
   }
 }

@@ -31,7 +31,7 @@ PairedServer desk({String shortId = deskId, String name = 'Desk'}) =>
 /// Bonjour stream. Everything completes in microtasks, so it works inside
 /// testWidgets' fake time.
 class Harness {
-  Harness._(this.client, this.discoveryEvents, this.services);
+  Harness._(this.client, this.discoveryEvents, this.services, this._stores);
 
   static Future<Harness> create({
     List<PairedServer> servers = const [],
@@ -56,12 +56,16 @@ class Harness {
       await services.servers.markUsed(s.shortId);
     }
     await services.settings.update((_) => settings);
-    return Harness._(client, events, services);
+    return Harness._(client, events, services, stores);
   }
 
   final FakeLanPilotClient client;
   final StreamController<RawService> discoveryEvents;
   final AppServices services;
+  final Map<String, MemoryJsonStore> _stores;
+
+  /// The in-memory file behind `name` (for example 'settings').
+  MemoryJsonStore json(String name) => _stores[name]!;
 
   ConnectionManager get connection => services.connection;
 

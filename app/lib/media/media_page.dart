@@ -34,6 +34,7 @@ class MediaPage extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final connection = ref.watch(connectionProvider);
+    final settings = ref.read(settingsProvider);
     final l = AppLocalizations.of(context);
     final p = context.palette;
     return ValueListenableBuilder<ConnState>(
@@ -55,14 +56,18 @@ class MediaPage extends ConsumerWidget {
                   borderRadius: BorderRadius.circular(20),
                   onTap: enabled
                       ? () async {
-                          unawaited(HapticFeedback.selectionClick());
+                          if (settings.value.haptics) {
+                            unawaited(HapticFeedback.selectionClick());
+                          }
                           try {
                             await connection.input.media(kind);
                           } on BridgeError {
                             if (!context.mounted) return;
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              SnackBar(content: Text(l.actionFailed)),
-                            );
+                            ScaffoldMessenger.of(context)
+                              ..hideCurrentSnackBar()
+                              ..showSnackBar(
+                                SnackBar(content: Text(l.actionFailed)),
+                              );
                           }
                         }
                       : null,

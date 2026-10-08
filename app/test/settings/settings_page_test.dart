@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:lanpilot/app/version.dart';
 import 'package:lanpilot/settings/settings.dart';
+import 'package:lanpilot/settings/settings_controller.dart';
 import 'package:lanpilot/settings/settings_page.dart';
 
 import '../support/harness.dart';
@@ -13,6 +14,9 @@ void main() {
     await tester.tap(find.byKey(const Key('setting-natural')));
     await tester.pump();
     expect(h.services.settings.value.naturalScroll, isFalse);
+    final reloaded = SettingsController(h.json('settings'));
+    await reloaded.load();
+    expect(reloaded.value.naturalScroll, isFalse);
     await tester.ensureVisible(find.byKey(const Key('setting-buttons')));
     await tester.pump();
     await tester.tap(find.byKey(const Key('setting-buttons')));
@@ -42,7 +46,10 @@ void main() {
     final h = await Harness.create();
     await tester.pumpWidget(testApp(h, const SettingsPage()));
     await tester.drag(
-      find.byKey(const Key('setting-sensitivity')),
+      find.descendant(
+        of: find.byKey(const Key('setting-sensitivity')),
+        matching: find.byType(Slider),
+      ),
       const Offset(200, 0),
     );
     await tester.pump();

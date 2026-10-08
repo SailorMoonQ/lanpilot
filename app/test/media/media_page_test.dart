@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:lanpilot/bridge/lanpilot_client.dart';
 import 'package:lanpilot/media/media_page.dart';
+import 'package:lanpilot/settings/settings.dart';
 import 'package:lanpilot/shortcuts/shortcuts_page.dart';
 
 import '../support/fake_client.dart';
@@ -26,6 +28,37 @@ void main() {
     await tester.tap(find.byKey(const Key('media-playPause')));
     await tester.pump();
     expect(h.client.calls.where((c) => c.startsWith('media')), isEmpty);
+  });
+
+  testWidgets('haptics setting gates the media vibration', (tester) async {
+    final calls = <String>[];
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      SystemChannels.platform,
+      (call) async {
+        calls.add(call.method);
+        return null;
+      },
+    );
+    addTearDown(
+      () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform,
+        null,
+      ),
+    );
+    final h = await Harness.create(
+      servers: [desk()],
+      settings: const Settings(haptics: false),
+    );
+    await tester.pumpWidget(testApp(h, const Scaffold(body: MediaPage())));
+    await h.connect(tester);
+    await tester.tap(find.byKey(const Key('media-mute')));
+    await tester.pump();
+    expect(h.client.calls.last, 'media mute');
+    expect(calls.where((c) => c.startsWith('HapticFeedback')), isEmpty);
+    await h.services.settings.update((s) => s.copyWith(haptics: true));
+    await tester.tap(find.byKey(const Key('media-mute')));
+    await tester.pump();
+    expect(calls, contains('HapticFeedback.vibrate'));
   });
 
   testWidgets('a failure is shown', (tester) async {

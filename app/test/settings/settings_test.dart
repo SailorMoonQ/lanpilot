@@ -1,10 +1,24 @@
+import 'dart:io';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:lanpilot/settings/settings.dart';
 import 'package:lanpilot/settings/settings_controller.dart';
 
 import '../support/memory_stores.dart';
 
+class _FailingStore extends MemoryJsonStore {
+  @override
+  Future<void> write(Map<String, Object?> data) =>
+      Future.error(const FileSystemException('disk full'));
+}
+
 void main() {
+  test('a failing write keeps the new value and does not throw', () async {
+    final c = SettingsController(_FailingStore());
+    await c.update((s) => s.copyWith(naturalScroll: false));
+    expect(c.value.naturalScroll, isFalse);
+  });
+
   test('defaults', () {
     const s = Settings();
     expect(s.sensitivity, 1.0);
