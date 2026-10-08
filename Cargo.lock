@@ -918,6 +918,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "lpctl"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "dirs",
+ "hex",
+ "lanpilot-agent",
+ "lanpilot-core",
+ "lanpilot-input",
+ "prost",
+ "rpassword",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+]
+
+[[package]]
 name = "lru-slab"
 version = "0.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"

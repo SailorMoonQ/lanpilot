@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["core", "input", "agent"]
+members = ["core", "input", "agent", "tools/lpctl"]
 
 [workspace.package]
 edition = "2024"
