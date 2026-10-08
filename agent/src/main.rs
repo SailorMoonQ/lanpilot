@@ -288,6 +288,7 @@ mod tests {
     use std::net::IpAddr;
     use std::time::Duration;
 
+    #[cfg(windows)]
     #[tokio::test]
     async fn shutdown_signal_registers_and_stays_pending() {
         let signal = shutdown_signal().unwrap();
@@ -298,12 +299,21 @@ mod tests {
         );
     }
 
+    /// The only test in this binary that installs signal handlers on unix:
+    /// tokio's signal registry is process-global, so a second test would
+    /// see this SIGTERM (or deliver one into this test's pending window).
     /// The handlers are installed before the kill, so SIGTERM cannot take
     /// the test process down. Runs in the Ubuntu CI job.
     #[cfg(unix)]
     #[tokio::test]
-    async fn sigterm_resolves_shutdown_signal() {
+    async fn shutdown_signal_stays_pending_until_sigterm() {
         let signal = shutdown_signal().unwrap();
+        tokio::pin!(signal);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut signal)
+                .await
+                .is_err()
+        );
         let status = std::process::Command::new("kill")
             .args(["-TERM", &std::process::id().to_string()])
             .status()
