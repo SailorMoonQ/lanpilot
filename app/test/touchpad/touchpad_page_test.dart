@@ -1,5 +1,9 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:lanpilot/bridge/lanpilot_client.dart';
+import 'package:lanpilot/connection/conn_state.dart';
 import 'package:lanpilot/settings/settings.dart';
 import 'package:lanpilot/touchpad/touchpad_page.dart';
 
@@ -58,6 +62,48 @@ void main() {
     expect(find.byKey(const Key('connection-overlay')), findsOneWidget);
     await h.connect(tester);
     expect(find.byKey(const Key('connection-overlay')), findsNothing);
+  });
+
+  testWidgets('the screen sleeps while the computer cannot be reached', (
+    tester,
+  ) async {
+    final awake = <bool>[];
+    final original = keepAwakeHook;
+    keepAwakeHook = awake.add;
+    addTearDown(() => keepAwakeHook = original);
+    final h = await Harness.create(servers: [desk()]);
+    await tester.pumpWidget(testApp(h, page()));
+    unawaited(h.connection.start());
+    await tester.pump();
+    expect(h.connection.state.value.status, ConnStatus.connecting);
+    expect(awake.last, isTrue);
+    await tester.pump(const Duration(seconds: 2));
+    expect(awake.last, isTrue);
+
+    // The computer went to sleep: reconnecting keeps the screen on, failing
+    // lets it sleep, and a retry that fails again keeps it asleep.
+    h.client.connectResults.addAll([
+      bridgeError(ErrorKind.unreachable),
+      bridgeError(ErrorKind.unreachable),
+    ]);
+    h.client.closeSession(1, CloseReason.timedOut);
+    await tester.pump();
+    expect(h.connection.state.value.status, ConnStatus.failed);
+    expect(awake.last, isFalse);
+    final count = awake.length;
+    await tester.pump(const Duration(seconds: 1));
+    expect(h.connection.state.value.status, ConnStatus.failed);
+    expect(awake.length, count);
+
+    // It woke up: the next retry connects and keeps the screen on again.
+    await tester.pump(const Duration(seconds: 2));
+    expect(h.connection.state.value.status, ConnStatus.connected);
+    expect(awake.last, isTrue);
+
+    await h.connection.unpair(desk());
+    await tester.pump();
+    expect(h.connection.state.value.status, ConnStatus.unpaired);
+    expect(awake.last, isFalse);
   });
 
   testWidgets('the button strip can be hidden', (tester) async {

@@ -31,7 +31,9 @@ void _keepAwake(bool on) =>
 void Function(bool on) keepAwakeHook = _keepAwake;
 
 /// The touchpad (spec 2.2, 5): the pad, the optional left and right buttons,
-/// and the connection overlay. Keeps the screen on while visible.
+/// and the connection overlay. Keeps the screen on while visible and the
+/// computer is connected or being reached; a failed or unpaired computer lets
+/// the phone sleep.
 class TouchpadPage extends ConsumerStatefulWidget {
   const TouchpadPage({super.key, this.active = true});
 
@@ -50,6 +52,7 @@ class _TouchpadPageState extends ConsumerState<TouchpadPage>
   late final TouchpadController _controller;
   late final GestureMachine _machine;
   late final Ticker _ticker;
+  bool _awake = false;
 
   @override
   void initState() {
@@ -62,18 +65,17 @@ class _TouchpadPageState extends ConsumerState<TouchpadPage>
     _machine = GestureMachine(_controller, config: _config());
     _settings.addListener(_reconfigure);
     _connection.state.addListener(_reconfigure);
+    _connection.state.addListener(_syncWakelock);
     _ticker = createTicker(_onTick);
-    if (widget.active) keepAwakeHook(true);
+    _syncWakelock();
   }
 
   @override
   void didUpdateWidget(TouchpadPage old) {
     super.didUpdateWidget(old);
     if (widget.active == old.active) return;
-    if (widget.active) {
-      keepAwakeHook(true);
-    } else {
-      keepAwakeHook(false);
+    _syncWakelock();
+    if (!widget.active) {
       _ticker.stop();
       _controller.flush();
       _controller.stopInertia();
@@ -86,6 +88,7 @@ class _TouchpadPageState extends ConsumerState<TouchpadPage>
     _controller.flush();
     _settings.removeListener(_reconfigure);
     _connection.state.removeListener(_reconfigure);
+    _connection.state.removeListener(_syncWakelock);
     _ticker.dispose();
     keepAwakeHook(false);
     super.dispose();
@@ -98,6 +101,20 @@ class _TouchpadPageState extends ConsumerState<TouchpadPage>
   );
 
   void _reconfigure() => _machine.config = _config();
+
+  void _syncWakelock() {
+    final awake =
+        widget.active &&
+        switch (_connection.state.value.status) {
+          ConnStatus.connected ||
+          ConnStatus.connecting ||
+          ConnStatus.reconnecting => true,
+          ConnStatus.failed || ConnStatus.unpaired => false,
+        };
+    if (awake == _awake) return;
+    _awake = awake;
+    keepAwakeHook(awake);
+  }
 
   void _onTick(Duration elapsed) {
     _controller.onFrame(elapsed);
