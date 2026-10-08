@@ -18,14 +18,20 @@ import 'storage/secret_store.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  await RustLib.init();
-  final docs = await getApplicationDocumentsDirectory();
-  final services = await createServices(
-    client: RustLanPilotClient(),
-    secrets: KeychainSecretStore(),
-    openJson: (name) => JsonFile(File('${docs.path}/$name.json')),
-    discoveryEvents: LanpilotDiscovery.events,
-  );
+  final AppServices services;
+  try {
+    await RustLib.init();
+    final docs = await getApplicationDocumentsDirectory();
+    services = await createServices(
+      client: RustLanPilotClient(),
+      secrets: KeychainSecretStore(),
+      openJson: (name) => JsonFile(File('${docs.path}/$name.json')),
+      discoveryEvents: LanpilotDiscovery.events,
+    );
+  } on Object catch (e) {
+    runApp(_StartupFailure('$e'));
+    return;
+  }
   final router = buildRouter(
     hasServers: services.servers.servers.value.isNotEmpty,
   );
@@ -44,4 +50,32 @@ Future<void> main() async {
     ),
   );
   unawaited(services.connection.start());
+}
+
+class _StartupFailure extends StatelessWidget {
+  const _StartupFailure(this.error);
+
+  final String error;
+
+  @override
+  Widget build(BuildContext context) => MaterialApp(
+    home: Scaffold(
+      body: Center(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text(
+                'LanPilot could not start',
+                style: TextStyle(fontSize: 20, fontWeight: FontWeight.w600),
+              ),
+              const SizedBox(height: 12),
+              Text(error, textAlign: TextAlign.center),
+            ],
+          ),
+        ),
+      ),
+    ),
+  );
 }

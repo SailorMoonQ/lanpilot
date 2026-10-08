@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../bridge/lanpilot_client.dart';
 import '../l10n/app_localizations.dart';
 import '../pairing/pairing_controller.dart';
 import '../settings/settings.dart';
@@ -67,7 +68,10 @@ class _LanPilotAppState extends ConsumerState<LanPilotApp> {
     try {
       await ref.read(pairingProvider).pairWithUri(uri.toString());
       widget.router.go('/control');
-    } on Object catch (e) {
+    } on Object catch (e, st) {
+      if (e is! BridgeError) {
+        FlutterError.reportError(FlutterErrorDetails(exception: e, stack: st));
+      }
       final context = widget.router.routerDelegate.navigatorKey.currentContext;
       if (context == null || !context.mounted) return;
       _messenger.currentState?.showSnackBar(

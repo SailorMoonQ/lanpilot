@@ -44,10 +44,20 @@ class _ControlPageState extends ConsumerState<ControlPage> {
     final s = _connection.state.value;
     if (s.showSwitcher) {
       _connection.acknowledgeSwitcher();
-      unawaited(showSwitcher(context));
+      // Not over a sheet that is already open or over a pushed page.
+      if (ModalRoute.of(context)?.isCurrent ?? false) {
+        unawaited(showSwitcher(context));
+      }
     }
     final noComputers = ref.read(serverStoreProvider).servers.value.isEmpty;
-    if (s.status == ConnStatus.unpaired && noComputers) context.go('/add');
+    if (s.status == ConnStatus.unpaired && noComputers) {
+      final path = GoRouter.of(context)
+          .routerDelegate
+          .currentConfiguration
+          .uri
+          .path;
+      if (!path.startsWith('/add')) context.go('/add');
+    }
   }
 
   @override
@@ -55,6 +65,7 @@ class _ControlPageState extends ConsumerState<ControlPage> {
     final l = AppLocalizations.of(context);
     final landscape =
         MediaQuery.orientationOf(context) == Orientation.landscape;
+    final onTop = ModalRoute.of(context)?.isCurrent ?? true;
     final tabs = [
       (Icons.touch_app_outlined, l.tabTouchpad),
       (Icons.bolt_outlined, l.tabShortcuts),
@@ -66,7 +77,11 @@ class _ControlPageState extends ConsumerState<ControlPage> {
         Expanded(
           child: IndexedStack(
             index: _tab,
-            children: const [TouchpadPage(), ShortcutsPage(), MediaPage()],
+            children: [
+              TouchpadPage(active: _tab == 0 && onTop),
+              const ShortcutsPage(),
+              const MediaPage(),
+            ],
           ),
         ),
       ],

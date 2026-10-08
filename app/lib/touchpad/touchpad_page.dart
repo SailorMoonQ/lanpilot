@@ -26,10 +26,18 @@ void _haptic(HapticKind kind) => unawaited(
 void _keepAwake(bool on) =>
     unawaited(WakelockPlus.toggle(enable: on).catchError((Object _) {}));
 
+/// Turns the screen wakelock on or off. Tests replace it.
+@visibleForTesting
+void Function(bool on) keepAwakeHook = _keepAwake;
+
 /// The touchpad (spec 2.2, 5): the pad, the optional left and right buttons,
 /// and the connection overlay. Keeps the screen on while visible.
 class TouchpadPage extends ConsumerStatefulWidget {
-  const TouchpadPage({super.key});
+  const TouchpadPage({super.key, this.active = true});
+
+  /// False while the page is hidden (another tab, a pushed page): the
+  /// wakelock is released and pending input is flushed.
+  final bool active;
 
   @override
   ConsumerState<TouchpadPage> createState() => _TouchpadPageState();
@@ -55,7 +63,21 @@ class _TouchpadPageState extends ConsumerState<TouchpadPage>
     _settings.addListener(_reconfigure);
     _connection.state.addListener(_reconfigure);
     _ticker = createTicker(_onTick);
-    _keepAwake(true);
+    if (widget.active) keepAwakeHook(true);
+  }
+
+  @override
+  void didUpdateWidget(TouchpadPage old) {
+    super.didUpdateWidget(old);
+    if (widget.active == old.active) return;
+    if (widget.active) {
+      keepAwakeHook(true);
+    } else {
+      keepAwakeHook(false);
+      _ticker.stop();
+      _controller.flush();
+      _controller.stopInertia();
+    }
   }
 
   @override
@@ -65,7 +87,7 @@ class _TouchpadPageState extends ConsumerState<TouchpadPage>
     _settings.removeListener(_reconfigure);
     _connection.state.removeListener(_reconfigure);
     _ticker.dispose();
-    _keepAwake(false);
+    keepAwakeHook(false);
     super.dispose();
   }
 
