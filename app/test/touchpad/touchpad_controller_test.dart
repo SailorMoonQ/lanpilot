@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:lanpilot/bridge/lanpilot_client.dart';
 import 'package:lanpilot/connection/input_controller.dart';
@@ -90,5 +92,53 @@ void main() {
     settings = settings.copyWith(haptics: false);
     c.haptic(HapticKind.tap);
     expect(haptics, [HapticKind.tap]);
+  });
+
+  test('zoom has at most one request in flight', () async {
+    final gate = Completer<void>();
+    client.zoomGate = gate;
+    c.zoom(2);
+    c.onFrame(ms(16));
+    await Future<void>.delayed(Duration.zero);
+    expect(client.calls.last, 'zoom 4.00');
+    for (var i = 2; i <= 4; i++) {
+      c.zoom(2);
+      c.onFrame(ms(i * 16));
+    }
+    expect(client.calls.where((x) => x.startsWith('zoom')), ['zoom 4.00']);
+    expect(c.needsFrames, isTrue);
+    gate.complete();
+    await Future<void>.delayed(Duration.zero);
+    c.onFrame(ms(100));
+    await Future<void>.delayed(Duration.zero);
+    expect(client.calls.where((x) => x.startsWith('zoom')), [
+      'zoom 4.00',
+      'zoom 12.00',
+    ]);
+    expect(c.needsFrames, isFalse);
+  });
+
+  test('button edges flush pending motion first', () async {
+    c.move(const Offset(5, 0), ms(0));
+    c.buttonDown(MouseButtonKind.left);
+    await Future<void>.delayed(Duration.zero);
+    c.move(const Offset(5, 0), ms(8));
+    c.buttonUp(MouseButtonKind.left);
+    await Future<void>.delayed(Duration.zero);
+    expect(client.calls.map((x) => x.split(' ').first), [
+      'pointer',
+      'button',
+      'pointer',
+      'button',
+    ]);
+  });
+
+  test('beginGesture flushes the previous gesture first', () {
+    c.move(const Offset(5, 0), ms(0));
+    c.beginGesture();
+    expect(client.calls.map((x) => x.split(' ').first), [
+      'pointer',
+      'beginGesture',
+    ]);
   });
 }

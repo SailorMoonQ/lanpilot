@@ -3,6 +3,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:lanpilot/settings/settings.dart';
 import 'package:lanpilot/touchpad/touchpad_page.dart';
 
+import '../support/fake_client.dart';
 import '../support/harness.dart';
 
 Widget page() => const Scaffold(body: TouchpadPage());
@@ -82,4 +83,30 @@ void main() {
     expect(left.dx, greaterThan(pad.dx));
     expect(right.dy, greaterThan(left.dy));
   });
+
+  for (final capable in [true, false]) {
+    testWidgets('pinch zoom is ${capable ? 'on' : 'off'} by capability', (
+      tester,
+    ) async {
+      final h = await Harness.create(servers: [desk()]);
+      h.client.connectResults.add(
+        fakeSession(1, capabilities: capable ? ['zoom'] : []),
+      );
+      await tester.pumpWidget(testApp(h, page()));
+      await h.connect(tester);
+      final c = tester.getCenter(find.byKey(const Key('touchpad')));
+      final a = await tester.startGesture(c - const Offset(20, 0), pointer: 1);
+      final b = await tester.startGesture(c + const Offset(20, 0), pointer: 2);
+      await tester.pump(const Duration(milliseconds: 50));
+      for (var i = 1; i <= 6; i++) {
+        await a.moveBy(const Offset(-8, 0));
+        await b.moveBy(const Offset(8, 0));
+        await tester.pump(const Duration(milliseconds: 16));
+      }
+      await a.up();
+      await b.up();
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(h.client.calls.any((x) => x.startsWith('zoom')), capable);
+    });
+  }
 }

@@ -26,6 +26,7 @@ class TouchpadController implements GestureSink {
   double _zoomSteps = 0;
   Inertia? _inertia;
   Duration? _lastFrame;
+  bool _zoomBusy = false;
 
   bool get needsFrames =>
       _inertia != null ||
@@ -121,10 +122,14 @@ class TouchpadController implements GestureSink {
       _input.scroll(_notches.dx, _notches.dy);
       _notches = Offset.zero;
     }
-    if (_zoomSteps != 0) {
+    // One zoom request at a time: requests are ordered behind each reply, so
+    // sending one per frame would queue without bound. Steps accumulate
+    // meanwhile and the next frame after the reply sends the rest.
+    if (_zoomSteps != 0 && !_zoomBusy) {
       final steps = _zoomSteps;
       _zoomSteps = 0;
-      unawaited(_input.zoom(steps));
+      _zoomBusy = true;
+      unawaited(_input.zoom(steps).whenComplete(() => _zoomBusy = false));
     }
   }
 }

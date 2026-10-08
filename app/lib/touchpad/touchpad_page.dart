@@ -83,7 +83,7 @@ class _TouchpadPageState extends ConsumerState<TouchpadPage>
   }
 
   void _kick() {
-    if (_ticker.isActive) return;
+    if (_ticker.isActive || !_controller.needsFrames) return;
     _controller.resetFrameClock();
     unawaited(_ticker.start());
   }
@@ -153,8 +153,12 @@ class _TouchpadPageState extends ConsumerState<TouchpadPage>
             ? MouseButtonStrip(
                 vertical: landscape,
                 input: _connection.input,
-                onPress: () {
-                  if (settings.haptics) _haptic(HapticKind.tap);
+                onEdge: (down) {
+                  _controller.flush();
+                  if (down) {
+                    _controller.stopInertia();
+                    _controller.haptic(HapticKind.tap);
+                  }
                 },
               )
             : null;
@@ -202,12 +206,14 @@ class MouseButtonStrip extends StatelessWidget {
     super.key,
     required this.vertical,
     required this.input,
-    required this.onPress,
+    required this.onEdge,
   });
 
   final bool vertical;
   final InputController input;
-  final VoidCallback onPress;
+
+  /// Called before each button edge to the computer.
+  final void Function(bool down) onEdge;
 
   @override
   Widget build(BuildContext context) {
@@ -218,11 +224,17 @@ class MouseButtonStrip extends StatelessWidget {
         key: key,
         behavior: HitTestBehavior.opaque,
         onPointerDown: (_) {
-          onPress();
+          onEdge(true);
           unawaited(input.button(kind, down: true));
         },
-        onPointerUp: (_) => unawaited(input.button(kind, down: false)),
-        onPointerCancel: (_) => unawaited(input.button(kind, down: false)),
+        onPointerUp: (_) {
+          onEdge(false);
+          unawaited(input.button(kind, down: false));
+        },
+        onPointerCancel: (_) {
+          onEdge(false);
+          unawaited(input.button(kind, down: false));
+        },
         child: Frosted(
           borderRadius: BorderRadius.circular(14),
           child: Container(

@@ -141,8 +141,13 @@ class FakeLanPilotClient implements LanPilotClient {
   Future<void> media(MediaKind action) => _request('media ${action.name}');
 
   @override
-  Future<void> zoom(double steps) =>
-      _request('zoom ${steps.toStringAsFixed(2)}');
+  Future<void> zoom(double steps) async {
+    await _request('zoom ${steps.toStringAsFixed(2)}');
+    await zoomGate?.future;
+  }
+
+  /// When set, zoom completes only after this does.
+  Completer<void>? zoomGate;
 
   /// When set, unpair completes only after this does.
   Completer<void>? unpairGate;
