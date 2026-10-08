@@ -1,5 +1,7 @@
 //! Shared core of LanPilot: protocol, identity, transport, pairing and discovery.
 
+#![forbid(unsafe_code)]
+
 pub use quinn;
 pub mod discovery;
 pub mod framing;
