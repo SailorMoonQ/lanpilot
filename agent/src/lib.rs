@@ -3,6 +3,7 @@
 pub mod config;
 pub mod devices;
 pub mod fsutil;
+pub mod pairing;
 pub mod paths;
 pub mod secret;
 
