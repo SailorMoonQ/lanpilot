@@ -16,11 +16,80 @@ use lanpilot_input::{
     MouseButton as InMouse,
 };
 use prost::Message;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, PoisonError};
 use tokio::sync::{broadcast, mpsc};
 
-pub type SharedInput = Arc<Mutex<Box<dyn InputBackend>>>;
+/// The machine's one input backend, shared by every session.
+pub type SharedInput = Arc<Mutex<InputHub>>;
+
+/// Wraps the backend so sessions share it safely: a mouse button held by
+/// several phones goes up only when the last of them releases it (spec 3.7).
+pub struct InputHub {
+    backend: Box<dyn InputBackend>,
+    button_holds: HashMap<InMouse, u32>,
+}
+
+impl InputHub {
+    pub fn new(backend: Box<dyn InputBackend>) -> Self {
+        Self {
+            backend,
+            button_holds: HashMap::new(),
+        }
+    }
+
+    pub fn shared(backend: Box<dyn InputBackend>) -> SharedInput {
+        Arc::new(Mutex::new(Self::new(backend)))
+    }
+
+    /// Adds one session's hold on `button`; only the first hold presses it.
+    pub fn press(&mut self, button: InMouse) -> Result<(), InputError> {
+        let holds = self.button_holds.entry(button).or_insert(0);
+        if *holds == 0 {
+            self.backend.button(button, true)?;
+        }
+        *holds += 1;
+        Ok(())
+    }
+
+    /// Drops one session's hold on `button`; the last hold releases it.
+    /// Callers only release what their session holds (`SessionState::held`).
+    pub fn release(&mut self, button: InMouse) -> Result<(), InputError> {
+        let Some(holds) = self.button_holds.get_mut(&button) else {
+            return Ok(());
+        };
+        *holds -= 1;
+        if *holds > 0 {
+            return Ok(());
+        }
+        self.button_holds.remove(&button);
+        self.backend.button(button, false)
+    }
+
+    pub fn move_relative(&mut self, dx: i32, dy: i32) -> Result<(), InputError> {
+        self.backend.move_relative(dx, dy)
+    }
+
+    pub fn scroll(&mut self, dx: f32, dy: f32) -> Result<(), InputError> {
+        self.backend.scroll(dx, dy)
+    }
+
+    pub fn key(&mut self, usage: HidUsage, down: bool) -> Result<(), InputError> {
+        self.backend.key(usage, down)
+    }
+
+    pub fn media(&mut self, key: MediaKey) -> Result<(), InputError> {
+        self.backend.media(key)
+    }
+
+    pub fn supports_text(&self) -> bool {
+        self.backend.supports_text()
+    }
+
+    pub fn text(&mut self, text: &str) -> Result<(), InputError> {
+        self.backend.text(text)
+    }
+}
 
 pub const CLOSE_DEVICE_REMOVED: u32 = 3;
 pub const CLOSE_UNPAIRED: u32 = 4;
@@ -69,7 +138,7 @@ fn bad(msg: &str) -> Failure {
     (ErrorCode::BadRequest, msg.to_owned())
 }
 
-fn apply_delta(input: &mut dyn InputBackend, d: PointerDelta) {
+fn apply_delta(input: &mut InputHub, d: PointerDelta) {
     if (d.dx != 0 || d.dy != 0)
         && let Err(e) = input.move_relative(d.dx, d.dy)
     {
@@ -88,17 +157,13 @@ fn apply_delta(input: &mut dyn InputBackend, d: PointerDelta) {
     }
 }
 
-fn apply_gesture(input: &mut dyn InputBackend, state: &mut SessionState, g: &GestureState) {
+fn apply_gesture(input: &mut InputHub, state: &mut SessionState, g: &GestureState) {
     if let Some(d) = state.applier.apply(g) {
         apply_delta(input, d);
     }
 }
 
-fn button(
-    input: &mut dyn InputBackend,
-    state: &mut SessionState,
-    b: PointerButton,
-) -> Result<(), Failure> {
+fn button(input: &mut InputHub, state: &mut SessionState, b: PointerButton) -> Result<(), Failure> {
     if let Some(g) = &b.gesture {
         apply_gesture(input, state, g);
     }
@@ -108,11 +173,14 @@ fn button(
         Ok(MouseButton::Middle) => InMouse::Middle,
         _ => return Err(bad("unknown mouse button")),
     };
-    input.button(which, b.down).map_err(from_input)?;
+    // Each session holds a button at most once; the hub counts sessions.
     if b.down {
-        state.held.insert(which);
-    } else {
-        state.held.remove(&which);
+        if !state.held.contains(&which) {
+            input.press(which).map_err(from_input)?;
+            state.held.insert(which);
+        }
+    } else if state.held.remove(&which) {
+        input.release(which).map_err(from_input)?;
     }
     Ok(())
 }
@@ -121,7 +189,7 @@ fn button(
 /// Keys whose release failed are kept in `held_keys` for `release_held`.
 /// Returns the first error.
 fn release_keys(
-    input: &mut dyn InputBackend,
+    input: &mut InputHub,
     state: &mut SessionState,
     keys: &[HidUsage],
 ) -> Result<(), InputError> {
@@ -135,11 +203,7 @@ fn release_keys(
     first.map_or(Ok(()), Err)
 }
 
-fn chord(
-    input: &mut dyn InputBackend,
-    state: &mut SessionState,
-    c: KeyChord,
-) -> Result<(), Failure> {
+fn chord(input: &mut InputHub, state: &mut SessionState, c: KeyChord) -> Result<(), Failure> {
     if c.usages.is_empty() || c.usages.len() > MAX_CHORD_KEYS {
         return Err(bad("a key chord needs 1 to 8 keys"));
     }
@@ -154,7 +218,7 @@ fn chord(
     release_keys(input, state, &pressed).map_err(from_input)
 }
 
-fn media(input: &mut dyn InputBackend, m: Media) -> Result<(), Failure> {
+fn media(input: &mut InputHub, m: Media) -> Result<(), Failure> {
     let key = match MediaAction::try_from(m.action) {
         Ok(MediaAction::PlayPause) => MediaKey::PlayPause,
         Ok(MediaAction::Next) => MediaKey::Next,
@@ -167,7 +231,7 @@ fn media(input: &mut dyn InputBackend, m: Media) -> Result<(), Failure> {
     input.media(key).map_err(from_input)
 }
 
-fn text(input: &mut dyn InputBackend, t: Text) -> Result<(), Failure> {
+fn text(input: &mut InputHub, t: Text) -> Result<(), Failure> {
     if !input.supports_text() {
         return Err((
             ErrorCode::Unsupported,
@@ -179,7 +243,7 @@ fn text(input: &mut dyn InputBackend, t: Text) -> Result<(), Failure> {
 
 pub fn handle_client_message(
     msg: ClientMessage,
-    input: &mut dyn InputBackend,
+    input: &mut InputHub,
     state: &mut SessionState,
 ) -> Handled {
     let mut unpair = false;
@@ -211,15 +275,15 @@ pub fn handle_client_message(
     Handled { reply, unpair }
 }
 
-pub fn apply_datagram(bytes: &[u8], input: &mut dyn InputBackend, state: &mut SessionState) {
+pub fn apply_datagram(bytes: &[u8], input: &mut InputHub, state: &mut SessionState) {
     if let Ok(PointerDatagram { gesture: Some(g) }) = PointerDatagram::decode(bytes) {
         apply_gesture(input, state, &g);
     }
 }
 
-pub fn release_held(input: &mut dyn InputBackend, state: &mut SessionState) {
+pub fn release_held(input: &mut InputHub, state: &mut SessionState) {
     for b in state.held.drain() {
-        if let Err(e) = input.button(b, false) {
+        if let Err(e) = input.release(b) {
             tracing::warn!("releasing {b:?} failed: {e}");
         }
     }
@@ -305,7 +369,7 @@ pub async fn run_session(
                 let handled = {
                     let mut input = input.lock().unwrap_or_else(PoisonError::into_inner);
                     let mut state = state.lock().unwrap_or_else(PoisonError::into_inner);
-                    handle_client_message(msg, input.as_mut(), &mut state)
+                    handle_client_message(msg, &mut input, &mut state)
                 };
                 if let Some(reply) = handled.reply
                     && tx.send(reply).await.is_err()
@@ -325,7 +389,7 @@ pub async fn run_session(
             while let Ok(bytes) = conn.read_datagram().await {
                 let mut input = input.lock().unwrap_or_else(PoisonError::into_inner);
                 let mut state = state.lock().unwrap_or_else(PoisonError::into_inner);
-                apply_datagram(&bytes, input.as_mut(), &mut state);
+                apply_datagram(&bytes, &mut input, &mut state);
             }
         })
     };
@@ -393,13 +457,18 @@ pub async fn run_session(
     // Every task has terminated; nothing can press after this release.
     let mut input = input.lock().unwrap_or_else(PoisonError::into_inner);
     let mut state = state.lock().unwrap_or_else(PoisonError::into_inner);
-    release_held(input.as_mut(), &mut state);
+    release_held(&mut input, &mut state);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lanpilot_input::recording::{Recorded, RecordingBackend};
+    use lanpilot_input::recording::{Recorded, RecordingBackend, RecordingHandle};
+
+    fn hub(supports_text: bool) -> (InputHub, RecordingHandle) {
+        let (b, h) = RecordingBackend::new(supports_text);
+        (InputHub::new(Box::new(b)), h)
+    }
 
     fn msg(id: u64, body: client_message::Body) -> ClientMessage {
         ClientMessage {
@@ -432,7 +501,7 @@ mod tests {
 
     #[test]
     fn button_with_gesture_catches_up_then_clicks() {
-        let (mut b, h) = RecordingBackend::new(true);
+        let (mut b, h) = hub(true);
         let mut s = SessionState::new();
         apply_datagram(
             &PointerDatagram {
@@ -467,7 +536,7 @@ mod tests {
 
     #[test]
     fn no_reply_for_request_id_zero() {
-        let (mut b, _h) = RecordingBackend::new(true);
+        let (mut b, _h) = hub(true);
         let mut s = SessionState::new();
         let out = handle_client_message(
             msg(
@@ -484,7 +553,7 @@ mod tests {
 
     #[test]
     fn chord_presses_in_order_and_releases_in_reverse() {
-        let (mut b, h) = RecordingBackend::new(true);
+        let (mut b, h) = hub(true);
         let mut s = SessionState::new();
         let out = handle_client_message(
             msg(
@@ -548,10 +617,10 @@ mod tests {
     #[test]
     fn chord_releases_every_key_even_if_one_release_fails() {
         let (inner, h) = RecordingBackend::new(true);
-        let mut b = FailRelease {
+        let mut b = InputHub::new(Box::new(FailRelease {
             inner,
             fail: HidUsage(0xE1),
-        };
+        }));
         let mut s = SessionState::new();
         let out = handle_client_message(
             msg(
@@ -589,7 +658,7 @@ mod tests {
 
     #[test]
     fn chord_limits() {
-        let (mut b, _h) = RecordingBackend::new(true);
+        let (mut b, _h) = hub(true);
         let mut s = SessionState::new();
         let empty = handle_client_message(
             msg(
@@ -615,7 +684,7 @@ mod tests {
 
     #[test]
     fn text_unsupported_and_run_command_unsupported() {
-        let (mut b, _h) = RecordingBackend::new(false);
+        let (mut b, _h) = hub(false);
         let mut s = SessionState::new();
         let t = handle_client_message(
             msg(1, client_message::Body::Text(Text { text: "hi".into() })),
@@ -638,7 +707,7 @@ mod tests {
 
     #[test]
     fn text_and_media_reach_the_backend() {
-        let (mut b, h) = RecordingBackend::new(true);
+        let (mut b, h) = hub(true);
         let mut s = SessionState::new();
         handle_client_message(
             msg(
@@ -671,7 +740,7 @@ mod tests {
 
     #[test]
     fn bad_requests() {
-        let (mut b, _h) = RecordingBackend::new(true);
+        let (mut b, _h) = hub(true);
         let mut s = SessionState::new();
         let none = handle_client_message(
             ClientMessage {
@@ -710,7 +779,7 @@ mod tests {
 
     #[test]
     fn unpair_is_acked_and_flagged() {
-        let (mut b, _h) = RecordingBackend::new(true);
+        let (mut b, _h) = hub(true);
         let mut s = SessionState::new();
         let out = handle_client_message(
             msg(9, client_message::Body::Unpair(Unpair {})),
@@ -723,7 +792,7 @@ mod tests {
 
     #[test]
     fn held_buttons_are_released() {
-        let (mut b, h) = RecordingBackend::new(true);
+        let (mut b, h) = hub(true);
         let mut s = SessionState::new();
         for button in [MouseButton::Left, MouseButton::Right] {
             handle_client_message(
@@ -767,7 +836,7 @@ mod tests {
 
     #[test]
     fn huge_scroll_is_clamped_before_the_backend() {
-        let (mut b, h) = RecordingBackend::new(true);
+        let (mut b, h) = hub(true);
         let mut s = SessionState::new();
         let mut g = gs(1, 1, 0.0, 0.0);
         g.total_scroll_x = -5.0e6;
@@ -786,9 +855,53 @@ mod tests {
         );
     }
 
+    fn left(down: bool) -> ClientMessage {
+        msg(
+            0,
+            client_message::Body::PointerButton(PointerButton {
+                button: MouseButton::Left as i32,
+                down,
+                gesture: None,
+            }),
+        )
+    }
+
+    fn count(h: &RecordingHandle, e: Recorded) -> usize {
+        h.events().iter().filter(|x| **x == e).count()
+    }
+
+    #[test]
+    fn a_button_held_by_two_sessions_goes_up_with_the_last() {
+        let (mut hub, h) = hub(true);
+        let (mut a, mut b) = (SessionState::new(), SessionState::new());
+        handle_client_message(left(true), &mut hub, &mut a);
+        handle_client_message(left(true), &mut hub, &mut b);
+        assert_eq!(count(&h, Recorded::Button(InMouse::Left, true)), 1);
+
+        handle_client_message(left(false), &mut hub, &mut b);
+        assert_eq!(count(&h, Recorded::Button(InMouse::Left, false)), 0);
+
+        release_held(&mut hub, &mut a);
+        assert_eq!(count(&h, Recorded::Button(InMouse::Left, false)), 1);
+    }
+
+    #[test]
+    fn releasing_a_button_this_session_does_not_hold_is_a_no_op() {
+        let (mut hub, h) = hub(true);
+        let (mut a, mut b) = (SessionState::new(), SessionState::new());
+        handle_client_message(left(true), &mut hub, &mut a);
+        handle_client_message(left(false), &mut hub, &mut b);
+        handle_client_message(left(false), &mut hub, &mut b);
+        assert_eq!(count(&h, Recorded::Button(InMouse::Left, false)), 0);
+        // A repeated press by the holder does not add a second hold.
+        handle_client_message(left(true), &mut hub, &mut a);
+        handle_client_message(left(false), &mut hub, &mut a);
+        assert_eq!(count(&h, Recorded::Button(InMouse::Left, false)), 1);
+    }
+
     #[test]
     fn garbage_datagram_is_ignored() {
-        let (mut b, h) = RecordingBackend::new(true);
+        let (mut b, h) = hub(true);
         let mut s = SessionState::new();
         apply_datagram(&[0xff, 0xff, 0xff], &mut b, &mut s);
         assert!(h.events().is_empty());
@@ -819,7 +932,7 @@ mod tests {
         let conn = server.accept().await.unwrap().await.unwrap();
         let (send, recv) = conn.accept_bi().await.unwrap();
         let (backend, handle) = RecordingBackend::new(true);
-        let input: SharedInput = Arc::new(Mutex::new(Box::new(backend)));
+        let input = InputHub::shared(Box::new(backend));
         run_session(conn, client_id.public_key(), send, recv, input, store).await;
 
         let (_client, err) = client_task.await.unwrap();

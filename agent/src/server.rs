@@ -6,7 +6,7 @@ use crate::devices::DeviceStore;
 use crate::pairing::{AgentPairing, current_os};
 use crate::paths::Paths;
 use crate::secret::load_or_create_identity;
-use crate::session::{SharedInput, run_session};
+use crate::session::{InputHub, SharedInput, run_session};
 use lanpilot_core::discovery::{Advertisement, Advertiser};
 use lanpilot_core::identity::{Identity, PublicKey};
 use lanpilot_core::pairing::flow::serve_pairing;
@@ -17,7 +17,7 @@ use lanpilot_core::transport::{peer_public_key, server_endpoint};
 use lanpilot_core::version::{PROTO_MAX, PROTO_MIN};
 use lanpilot_input::InputBackend;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::timeout;
 use tokio_util::task::TaskTracker;
@@ -54,7 +54,7 @@ impl Agent {
             config,
             store,
             pairing,
-            input: Arc::new(Mutex::new(input)),
+            input: InputHub::shared(input),
             supports_text,
             tasks: TaskTracker::new(),
             _watcher: watcher,
