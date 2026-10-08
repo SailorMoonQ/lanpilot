@@ -94,6 +94,7 @@ impl InputHub {
 pub const CLOSE_DEVICE_REMOVED: u32 = 3;
 pub const CLOSE_UNPAIRED: u32 = 4;
 pub const MAX_CHORD_KEYS: usize = 8;
+pub const MAX_TEXT_CHARS: usize = 4096;
 
 pub struct SessionState {
     applier: PointerApplier,
@@ -232,6 +233,12 @@ fn media(input: &mut InputHub, m: Media) -> Result<(), Failure> {
 }
 
 fn text(input: &mut InputHub, t: Text) -> Result<(), Failure> {
+    if t.text.chars().nth(MAX_TEXT_CHARS).is_some() {
+        return Err((
+            ErrorCode::BadRequest,
+            format!("text is limited to {MAX_TEXT_CHARS} characters"),
+        ));
+    }
     if !input.supports_text() {
         return Err((
             ErrorCode::Unsupported,
@@ -703,6 +710,37 @@ mod tests {
             &mut s,
         );
         assert_eq!(error_code(&r), Some(ErrorCode::Unsupported));
+    }
+
+    #[test]
+    fn text_longer_than_the_limit_is_rejected() {
+        let (mut b, h) = hub(true);
+        let mut s = SessionState::new();
+        let at_limit = "你".repeat(MAX_TEXT_CHARS);
+        let ok = handle_client_message(
+            msg(1, client_message::Body::Text(Text { text: at_limit })),
+            &mut b,
+            &mut s,
+        );
+        assert!(is_ack(&ok, 1));
+        let long = handle_client_message(
+            msg(
+                2,
+                client_message::Body::Text(Text {
+                    text: "a".repeat(MAX_TEXT_CHARS + 1),
+                }),
+            ),
+            &mut b,
+            &mut s,
+        );
+        assert_eq!(error_code(&long), Some(ErrorCode::BadRequest));
+        match long.reply.unwrap().body.unwrap() {
+            server_message::Body::Error(e) => {
+                assert_eq!(e.message, "text is limited to 4096 characters")
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(h.events().len(), 1, "only the text at the limit is typed");
     }
 
     #[test]
