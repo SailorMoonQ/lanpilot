@@ -6,6 +6,7 @@ use lanpilot_core::discovery::{
     Advertisement, Advertiser, Browser, DiscoveredDevice, DiscoveryEvent,
 };
 use lanpilot_core::proto::v1::Os;
+use std::collections::BTreeSet;
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
 
@@ -91,8 +92,24 @@ async fn explicit_addrs_are_the_only_ones_advertised() {
     let mut browser = Browser::start().unwrap();
     let advertiser = Advertiser::start(&ad).unwrap();
 
-    let found = wait_found(&mut browser, &ad.short_id).await;
-    assert_eq!(found.addrs, vec![ip]);
+    // Addresses can arrive in later updates (mdns-sd resolves per interface),
+    // so collect every Found for this device for a while and check the union.
+    let mut seen: BTreeSet<IpAddr> = wait_found(&mut browser, &ad.short_id)
+        .await
+        .addrs
+        .into_iter()
+        .collect();
+    let _ = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if let Some(DiscoveryEvent::Found(d)) = browser.next().await
+                && d.short_id == ad.short_id
+            {
+                seen.extend(d.addrs);
+            }
+        }
+    })
+    .await;
+    assert_eq!(seen, BTreeSet::from([ip]));
 
     advertiser.stop().await;
     wait_lost(&mut browser, &ad.short_id).await;
