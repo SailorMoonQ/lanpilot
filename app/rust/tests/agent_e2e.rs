@@ -350,21 +350,15 @@ async fn reconnect_replaces_the_session() {
 async fn disconnect_waits_for_an_in_flight_connect() {
     let h = Harness::start().await;
     let (client, info) = paired(&h).await;
-    let client = Arc::new(client);
-    let connecting = {
-        let client = client.clone();
-        let info = info.clone();
-        tokio::spawn(async move { client.connect(&info.public_key_hex, &info.addrs).await })
-    };
-    // Give the spawned connect time to take the operations lock; the
-    // handshake itself is still in flight or just done, and the disconnect
-    // must end up closing whatever it produced. (There is no hook to observe
-    // the lock, and a yield alone leaves the spawned task unscheduled on a
-    // multi-thread runtime.)
-    tokio::time::sleep(Duration::from_millis(5)).await;
-    client.disconnect().await;
-    let _ = connecting.await.unwrap();
-    // Whatever order they ran in, nothing may be left connected.
+    // `biased` polls the connect first: it takes the free ops lock and parks
+    // on the network, so the disconnect queues behind it (FIFO mutex).
+    let (connected, ()) = tokio::join!(
+        biased;
+        client.connect(&info.public_key_hex, &info.addrs),
+        client.disconnect(),
+    );
+    assert!(connected.is_ok(), "{connected:?}");
+    // The disconnect ran after the connect, so nothing is left connected.
     assert_eq!(
         client.send_pointer(1.0, 0.0).unwrap_err().kind,
         ErrorKind::NotConnected
