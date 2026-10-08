@@ -6,6 +6,9 @@ analyzer:
     - lib/l10n/app_localizations*.dart
     - build/**
     - ios/**
+    # Vendored flutter_rust_bridge build tooling (its own package, resolved
+    # only during native builds).
+    - rust_builder/**
   language:
     strict-casts: true
     strict-raw-types: true
