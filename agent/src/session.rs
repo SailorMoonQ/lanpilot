@@ -14,8 +14,8 @@ use lanpilot_core::transport::finish_and_confirm;
 use lanpilot_input::{HidUsage, InputBackend, InputError, MediaKey, MouseButton as InMouse};
 use prost::Message;
 use std::collections::HashSet;
-use std::sync::{Arc, Mutex};
-use tokio::sync::mpsc;
+use std::sync::{Arc, Mutex, PoisonError};
+use tokio::sync::{broadcast, mpsc};
 
 pub type SharedInput = Arc<Mutex<Box<dyn InputBackend>>>;
 
@@ -206,6 +206,14 @@ pub async fn run_session(
     input: SharedInput,
     store: Arc<DeviceStore>,
 ) {
+    // Subscribe first, then check membership, so a removal can never slip
+    // between authorization and the watcher.
+    let mut removed = store.subscribe_removed();
+    if !store.contains(&peer) {
+        conn.close(CLOSE_DEVICE_REMOVED.into(), b"device removed");
+        return;
+    }
+
     let state = Arc::new(Mutex::new(SessionState::new()));
     let (tx, mut rx) = mpsc::channel::<ServerMessage>(64);
 
@@ -220,17 +228,21 @@ pub async fn run_session(
     });
 
     // Reader: owns the receive stream; never cancelled mid-frame.
-    let reader = {
+    let mut reader = {
         let (state, input) = (state.clone(), input.clone());
         tokio::spawn(async move {
             loop {
                 let msg = match read_msg::<ClientMessage, _>(&mut recv).await {
                     Ok(Some(m)) => m,
-                    Ok(None) | Err(_) => return false,
+                    Ok(None) => return false,
+                    Err(e) => {
+                        tracing::debug!("control stream read failed: {e}");
+                        return false;
+                    }
                 };
                 let handled = {
-                    let mut input = input.lock().expect("input lock poisoned");
-                    let mut state = state.lock().expect("session lock poisoned");
+                    let mut input = input.lock().unwrap_or_else(PoisonError::into_inner);
+                    let mut state = state.lock().unwrap_or_else(PoisonError::into_inner);
                     handle_client_message(msg, input.as_mut(), &mut state)
                 };
                 if let Some(reply) = handled.reply
@@ -245,50 +257,76 @@ pub async fn run_session(
         })
     };
 
-    let datagrams = {
+    let mut datagrams = {
         let (state, input, conn) = (state.clone(), input.clone(), conn.clone());
         tokio::spawn(async move {
             while let Ok(bytes) = conn.read_datagram().await {
-                let mut input = input.lock().expect("input lock poisoned");
-                let mut state = state.lock().expect("session lock poisoned");
+                let mut input = input.lock().unwrap_or_else(PoisonError::into_inner);
+                let mut state = state.lock().unwrap_or_else(PoisonError::into_inner);
                 apply_datagram(&bytes, input.as_mut(), &mut state);
             }
         })
     };
 
-    let removal = {
-        let mut removed = store.subscribe_removed();
-        let conn = conn.clone();
+    let mut removal = {
+        let (conn, store) = (conn.clone(), store.clone());
         tokio::spawn(async move {
-            while let Ok(key) = removed.recv().await {
-                if key == peer {
-                    conn.close(CLOSE_DEVICE_REMOVED.into(), b"device removed");
-                    return;
+            loop {
+                match removed.recv().await {
+                    Ok(key) if key == peer => {}
+                    Ok(_) => continue,
+                    Err(broadcast::error::RecvError::Lagged(_)) if store.contains(&peer) => {
+                        continue;
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(broadcast::error::RecvError::Closed) => return,
                 }
+                conn.close(CLOSE_DEVICE_REMOVED.into(), b"device removed");
+                return;
             }
         })
     };
 
-    let mut reader = reader;
-    let unpaired = tokio::select! {
-        r = &mut reader => r.unwrap_or(false),
-        _ = conn.closed() => false,
+    // Biased: a reader result (notably an acknowledged Unpair) wins over a
+    // simultaneous connection close.
+    let (reader_result, closed_first) = tokio::select! {
+        biased;
+        r = &mut reader => (Some(r.unwrap_or(false)), false),
+        _ = conn.closed() => {
+            if reader.is_finished() {
+                (Some((&mut reader).await.unwrap_or(false)), true)
+            } else {
+                (None, true)
+            }
+        }
     };
+    let unpaired = reader_result == Some(true);
+
+    // No more pointer input and no watcher racing the close code below.
+    datagrams.abort();
+    removal.abort();
+    let _ = (&mut datagrams).await;
+    let _ = (&mut removal).await;
+
     if unpaired {
         let _ = writer.await; // the Ack is delivered before the device disappears
         if let Err(e) = store.remove(&peer) {
             tracing::error!("cannot remove unpaired device: {e}");
         }
         conn.close(CLOSE_UNPAIRED.into(), b"unpaired");
-    } else {
-        writer.abort();
+    } else if closed_first {
         reader.abort();
+        writer.abort();
+        let _ = (&mut reader).await;
+        let _ = writer.await;
+    } else {
+        let _ = writer.await; // drains replies and finishes the stream
+        conn.close(0u32.into(), b"session ended");
     }
-    datagrams.abort();
-    removal.abort();
 
-    let mut input = input.lock().expect("input lock poisoned");
-    let mut state = state.lock().expect("session lock poisoned");
+    // Every task has terminated; nothing can press after this release.
+    let mut input = input.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut state = state.lock().unwrap_or_else(PoisonError::into_inner);
     release_held(input.as_mut(), &mut state);
 }
 
@@ -590,5 +628,43 @@ mod tests {
         let mut s = SessionState::new();
         apply_datagram(&[0xff, 0xff, 0xff], &mut b, &mut s);
         assert!(h.events().is_empty());
+    }
+
+    #[tokio::test]
+    async fn session_for_removed_device_closes_immediately() {
+        use lanpilot_core::identity::Identity;
+        use lanpilot_core::transport::{client_endpoint, connect, server_endpoint};
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = DeviceStore::open(dir.path().join("devices.json")).unwrap();
+        let server_id = Identity::generate();
+        let client_id = Identity::generate();
+        // The client key is never added, as if it was removed after authorization.
+        let server = server_endpoint(&server_id, ([127, 0, 0, 1], 0).into()).unwrap();
+        let addr = server.local_addr().unwrap();
+        let client = client_endpoint(&client_id).unwrap();
+
+        let client_task = tokio::spawn(async move {
+            let conn = connect(&client, addr).await.unwrap();
+            let (mut send, _recv) = conn.open_bi().await.unwrap();
+            send.write_all(&[0]).await.unwrap();
+            let err = conn.closed().await;
+            (client, err)
+        });
+
+        let conn = server.accept().await.unwrap().await.unwrap();
+        let (send, recv) = conn.accept_bi().await.unwrap();
+        let (backend, handle) = RecordingBackend::new(true);
+        let input: SharedInput = Arc::new(Mutex::new(Box::new(backend)));
+        run_session(conn, client_id.public_key(), send, recv, input, store).await;
+
+        let (_client, err) = client_task.await.unwrap();
+        match err {
+            quinn::ConnectionError::ApplicationClosed(c) => {
+                assert_eq!(u64::from(c.error_code), u64::from(CLOSE_DEVICE_REMOVED));
+            }
+            other => panic!("unexpected close: {other:?}"),
+        }
+        assert!(handle.events().is_empty());
     }
 }
