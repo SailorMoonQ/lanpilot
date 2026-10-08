@@ -45,6 +45,8 @@ dependencies:
   app_links: ^7.2.2
   connectivity_plus: ^7.3.2
   url_launcher: ^6.3.3
+  lanpilot_discovery:
+    path: packages/lanpilot_discovery
   wakelock_plus: ^1.8.1
   intl: ^0.20.3
   flutter_localizations:
