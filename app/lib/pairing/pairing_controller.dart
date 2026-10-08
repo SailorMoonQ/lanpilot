@@ -19,7 +19,11 @@ String normalizeAddress(String input) {
 }
 
 bool isPairingCode(String? raw) =>
-    raw != null && raw.trim().startsWith('lanpilot://pair?');
+    raw != null && _linkPattern.hasMatch(raw.trim());
+
+/// Message for any failure of a pairing attempt, bridge error or not.
+String pairingFailureText(Object e, AppLocalizations l) =>
+    e is BridgeError ? pairingErrorText(e, l) : l.errGeneric('$e');
 
 String pairingErrorText(BridgeError e, AppLocalizations l) => switch (e.kind) {
   ErrorKind.invalidInput => l.errInvalidCode,
@@ -48,7 +52,10 @@ String pairingErrorText(BridgeError e, AppLocalizations l) => switch (e.kind) {
 /// Network prompt fires here, and a socket created before access was granted
 /// stays blocked (M0). Like connecting (spec 4.4), a pairing that times out or
 /// finds nothing reachable resets the endpoint and tries once more. The token
-/// is still valid then: the computer never saw the first attempt.
+/// is usually still valid then: the computer typically never saw the first
+/// attempt. If a timeout came from a connection that died after the token was
+/// sent, the retry finds the token consumed (badToken); that is reported as
+/// the original timeout, since the computer may in fact have paired.
 class PairingController {
   PairingController(this._client, this._connection);
 
@@ -84,7 +91,14 @@ class PairingController {
           e.kind == ErrorKind.timeout || e.kind == ErrorKind.unreachable;
       if (!retryable) rethrow;
       await _client.resetEndpoint();
-      return pair();
+      try {
+        return await pair();
+      } on BridgeError catch (second) {
+        if (e.kind == ErrorKind.timeout && second.kind == ErrorKind.badToken) {
+          throw e;
+        }
+        rethrow;
+      }
     }
   }
 }

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:lanpilot/bridge/lanpilot_client.dart';
@@ -46,5 +48,35 @@ void main() {
     await tester.tap(find.byKey(const Key('password-pair')));
     await tester.pump();
     expect(find.text('Wrong password.'), findsOneWidget);
+  });
+
+  testWidgets('submitting twice pairs once', (tester) async {
+    final h = await Harness.create();
+    h.client.pairGate = Completer<void>();
+    await tester.pumpWidget(testApp(h, const PasswordPairPage()));
+    await tester.enterText(find.byKey(const Key('address-field')), '10.0.0.5');
+    await tester.enterText(find.byKey(const Key('password-field')), 'secret1');
+    await tester.testTextInput.receiveAction(TextInputAction.done);
+    await tester.pump();
+    await tester.testTextInput.receiveAction(TextInputAction.done);
+    await tester.pump();
+    expect(
+      h.client.calls.where((c) => c.startsWith('pairWithPassword')),
+      hasLength(1),
+    );
+    h.client.pairGate!.complete();
+    await tester.pump(const Duration(seconds: 2));
+    await tester.pumpAndSettle();
+  });
+
+  testWidgets('an unexpected error is shown, not swallowed', (tester) async {
+    final h = await Harness.create();
+    h.client.pairResult = StateError('boom');
+    await tester.pumpWidget(testApp(h, const PasswordPairPage()));
+    await tester.enterText(find.byKey(const Key('address-field')), '10.0.0.5');
+    await tester.enterText(find.byKey(const Key('password-field')), 'x');
+    await tester.tap(find.byKey(const Key('password-pair')));
+    await tester.pump();
+    expect(find.textContaining('boom'), findsOneWidget);
   });
 }

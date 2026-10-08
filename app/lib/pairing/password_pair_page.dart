@@ -34,6 +34,7 @@ class _PasswordPairPageState extends ConsumerState<PasswordPairPage> {
   }
 
   Future<void> _pair() async {
+    if (_busy) return;
     final l = AppLocalizations.of(context);
     final device = widget.device;
     final address = device != null && device.addrs.isNotEmpty
@@ -48,8 +49,8 @@ class _PasswordPairPageState extends ConsumerState<PasswordPairPage> {
           .read(pairingProvider)
           .pairWithPassword(address: address, password: _password.text);
       if (mounted) context.go('/control');
-    } on BridgeError catch (e) {
-      if (mounted) setState(() => _error = pairingErrorText(e, l));
+    } on Object catch (e) {
+      if (mounted) setState(() => _error = pairingFailureText(e, l));
     } finally {
       if (mounted) setState(() => _busy = false);
     }

@@ -6,12 +6,13 @@ import 'package:go_router/go_router.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 
 import '../app/providers.dart';
-import '../bridge/lanpilot_client.dart';
 import '../l10n/app_localizations.dart';
 import 'pairing_controller.dart';
+import 'scan_pairing_flow.dart';
 
 /// Scans the QR code the computer shows (parent spec 4.2). Not widget-tested:
-/// the camera only exists on a device; see docs/e2e/m2-checklist.md.
+/// the camera only exists on a device; see docs/e2e/m2-checklist.md. The
+/// decisions live in [ScanPairingFlow], which is unit-tested.
 class ScanPage extends ConsumerStatefulWidget {
   const ScanPage({super.key});
 
@@ -23,8 +24,19 @@ class _ScanPageState extends ConsumerState<ScanPage> {
   final _scanner = MobileScannerController(
     formats: const [BarcodeFormat.qrCode],
   );
-  bool _busy = false;
-  String? _error;
+  late final ScanPairingFlow _flow;
+
+  @override
+  void initState() {
+    super.initState();
+    final pairing = ref.read(pairingProvider);
+    _flow = ScanPairingFlow(
+      pair: pairing.pairWithUri,
+      startScanner: _scanner.start,
+      stopScanner: _scanner.stop,
+      isAlive: () => mounted,
+    );
+  }
 
   @override
   void dispose() {
@@ -33,31 +45,31 @@ class _ScanPageState extends ConsumerState<ScanPage> {
   }
 
   Future<void> _onDetect(BarcodeCapture capture) async {
-    if (_busy) return;
     final raw = capture.barcodes
         .map((b) => b.rawValue)
         .where(isPairingCode)
         .firstOrNull;
     if (raw == null) return;
-    final l = AppLocalizations.of(context);
-    setState(() => _busy = true);
-    await _scanner.stop();
-    try {
-      await ref.read(pairingProvider).pairWithUri(raw);
-      if (mounted) context.go('/control');
-    } on BridgeError catch (e) {
-      if (!mounted) return;
-      setState(() {
-        _error = pairingErrorText(e, l);
-        _busy = false;
-      });
-      await _scanner.start();
+    final pending = _flow.handle(raw);
+    setState(() {});
+    final outcome = await pending;
+    if (!mounted) return;
+    if (outcome == ScanOutcome.paired) {
+      context.go('/control');
+    } else {
+      setState(() {});
     }
+  }
+
+  Future<void> _rescan() async {
+    await _flow.rescan();
+    if (mounted) setState(() {});
   }
 
   @override
   Widget build(BuildContext context) {
     final l = AppLocalizations.of(context);
+    final error = _flow.error;
     return Scaffold(
       appBar: AppBar(title: Text(l.scanQr)),
       body: Stack(
@@ -76,10 +88,23 @@ class _ScanPageState extends ConsumerState<ScanPage> {
                   color: Colors.black54,
                   borderRadius: BorderRadius.circular(12),
                 ),
-                child: Text(
-                  _error ?? (_busy ? l.pairing : l.scanHint),
-                  textAlign: TextAlign.center,
-                  style: const TextStyle(color: Colors.white),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      error != null
+                          ? pairingFailureText(error, l)
+                          : (_flow.busy ? l.pairing : l.scanHint),
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(color: Colors.white),
+                    ),
+                    if (_flow.needsRescan)
+                      TextButton(
+                        key: const Key('scan-retry'),
+                        onPressed: () => unawaited(_rescan()),
+                        child: Text(l.retry),
+                      ),
+                  ],
                 ),
               ),
             ),

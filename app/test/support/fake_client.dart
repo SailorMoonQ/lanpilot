@@ -46,6 +46,9 @@ class FakeLanPilotClient implements LanPilotClient {
   /// Results for the next pair calls, consumed in order before [pairResult].
   final pairResults = <Object>[];
 
+  /// When set, every pair call waits for it before returning its result.
+  Completer<void>? pairGate;
+
   /// Thrown by every request (button, media, zoom, keyChord, unpair) if set.
   Object? requestError;
 
@@ -81,6 +84,7 @@ class FakeLanPilotClient implements LanPilotClient {
   @override
   Future<PairedServerInfo> pairWithUri(String uri) async {
     calls.add('pairWithUri $uri');
+    await pairGate?.future;
     return _pair();
   }
 
@@ -90,12 +94,13 @@ class FakeLanPilotClient implements LanPilotClient {
     required String password,
   }) async {
     calls.add('pairWithPassword $addr $password');
+    await pairGate?.future;
     return _pair();
   }
 
   PairedServerInfo _pair() {
     final result = pairResults.isEmpty ? pairResult : pairResults.removeAt(0);
-    if (result is BridgeError) throw result;
+    if (result is BridgeError || result is Error) throw result!;
     return result is PairedServerInfo ? result : fakeServerInfo();
   }
 

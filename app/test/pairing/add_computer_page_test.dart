@@ -83,11 +83,20 @@ void main() {
     expect(find.byKey(const Key('nearby-$deskId')), findsNothing);
   });
 
-  testWidgets('scan and manual entry open their pages', (tester) async {
+  testWidgets('scan opens the scan page', (tester) async {
     final h = await Harness.create();
     await tester.pumpWidget(testApp(h, const AddComputerPage()));
     await tester.tap(find.byKey(const Key('add-scan')));
     await tester.pumpAndSettle();
     expect(find.text('route:/add/scan'), findsOneWidget);
+  });
+
+  testWidgets('manual entry opens the manual page', (tester) async {
+    final h = await Harness.create();
+    await tester.pumpWidget(testApp(h, const AddComputerPage()));
+    await tester.ensureVisible(find.byKey(const Key('add-manual')));
+    await tester.tap(find.byKey(const Key('add-manual')));
+    await tester.pumpAndSettle();
+    expect(find.text('route:/add/manual'), findsOneWidget);
   });
 }

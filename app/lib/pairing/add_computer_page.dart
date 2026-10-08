@@ -7,7 +7,6 @@ import 'package:go_router/go_router.dart';
 
 import '../app/labels.dart';
 import '../app/providers.dart';
-import '../bridge/lanpilot_client.dart';
 import '../l10n/app_localizations.dart';
 import '../theme/app_theme.dart';
 import 'pairing_controller.dart';
@@ -34,10 +33,12 @@ class _AddComputerPageState extends ConsumerState<AddComputerPage> {
 
   Future<void> _paste() async {
     final data = await Clipboard.getData(Clipboard.kTextPlain);
+    if (!mounted) return;
     setState(() => _link.text = data?.text?.trim() ?? '');
   }
 
   Future<void> _pair() async {
+    if (_busy) return;
     final l = AppLocalizations.of(context);
     setState(() {
       _busy = true;
@@ -46,8 +47,8 @@ class _AddComputerPageState extends ConsumerState<AddComputerPage> {
     try {
       await ref.read(pairingProvider).pairWithUri(_link.text);
       if (mounted) context.go('/control');
-    } on BridgeError catch (e) {
-      if (mounted) setState(() => _error = pairingErrorText(e, l));
+    } on Object catch (e) {
+      if (mounted) setState(() => _error = pairingFailureText(e, l));
     } finally {
       if (mounted) setState(() => _busy = false);
     }

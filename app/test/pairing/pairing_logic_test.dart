@@ -32,6 +32,8 @@ void main() {
     expect(isPairingCode(' lanpilot://pair?d=x '), isTrue);
     expect(isPairingCode('https://example.com'), isFalse);
     expect(isPairingCode(null), isFalse);
+    expect(isPairingCode('lanpilot://pair?x'), isFalse);
+    expect(isPairingCode('lanpilot://pair?d='), isFalse);
   });
 
   group('PairingController', () {
@@ -79,6 +81,32 @@ void main() {
       expect(
         h.client.calls.where((c) => c.startsWith('pairWithPassword')),
         hasLength(2),
+      );
+    });
+
+    test('a consumed token after a timeout reports the timeout', () async {
+      h.client.pairResults.addAll([
+        bridgeError(ErrorKind.timeout),
+        bridgeError(ErrorKind.badToken),
+      ]);
+      await expectLater(
+        PairingController(
+          h.client,
+          h.connection,
+        ).pairWithUri('lanpilot://pair?d=abc'),
+        throwsA(
+          isA<BridgeError>().having((e) => e.kind, 'kind', ErrorKind.timeout),
+        ),
+      );
+      expect(
+        h.client.calls.where(
+          (c) => c.startsWith('pair') || c == 'resetEndpoint',
+        ),
+        [
+          'pairWithUri lanpilot://pair?d=abc',
+          'resetEndpoint',
+          'pairWithUri lanpilot://pair?d=abc',
+        ],
       );
     });
 
