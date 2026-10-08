@@ -26,6 +26,8 @@ pub const MAX_CHORD_KEYS: usize = 8;
 pub struct SessionState {
     applier: PointerApplier,
     held: HashSet<InMouse>,
+    /// Keys whose release failed; retried when the session ends.
+    held_keys: HashSet<HidUsage>,
 }
 
 impl SessionState {
@@ -33,6 +35,7 @@ impl SessionState {
         Self {
             applier: PointerApplier::new(),
             held: HashSet::new(),
+            held_keys: HashSet::new(),
         }
     }
 }
@@ -105,24 +108,41 @@ fn button(
     Ok(())
 }
 
-fn chord(input: &mut dyn InputBackend, c: KeyChord) -> Result<(), Failure> {
+/// Releases `keys` in reverse order, attempting every one even if some fail.
+/// Keys whose release failed are kept in `held_keys` for `release_held`.
+/// Returns the first error.
+fn release_keys(
+    input: &mut dyn InputBackend,
+    state: &mut SessionState,
+    keys: &[HidUsage],
+) -> Result<(), InputError> {
+    let mut first = None;
+    for k in keys.iter().rev() {
+        if let Err(e) = input.key(*k, false) {
+            state.held_keys.insert(*k);
+            first.get_or_insert(e);
+        }
+    }
+    first.map_or(Ok(()), Err)
+}
+
+fn chord(
+    input: &mut dyn InputBackend,
+    state: &mut SessionState,
+    c: KeyChord,
+) -> Result<(), Failure> {
     if c.usages.is_empty() || c.usages.len() > MAX_CHORD_KEYS {
         return Err(bad("a key chord needs 1 to 8 keys"));
     }
     let mut pressed: Vec<HidUsage> = Vec::with_capacity(c.usages.len());
     for u in c.usages.iter().map(|u| HidUsage(*u)) {
         if let Err(e) = input.key(u, true) {
-            for p in pressed.iter().rev() {
-                let _ = input.key(*p, false);
-            }
+            let _ = release_keys(input, state, &pressed);
             return Err(from_input(e));
         }
         pressed.push(u);
     }
-    for p in pressed.iter().rev() {
-        input.key(*p, false).map_err(from_input)?;
-    }
-    Ok(())
+    release_keys(input, state, &pressed).map_err(from_input)
 }
 
 fn media(input: &mut dyn InputBackend, m: Media) -> Result<(), Failure> {
@@ -156,7 +176,7 @@ pub fn handle_client_message(
     let mut unpair = false;
     let result: Result<(), Failure> = match msg.body {
         Some(client_message::Body::PointerButton(b)) => button(input, state, b),
-        Some(client_message::Body::KeyChord(c)) => chord(input, c),
+        Some(client_message::Body::KeyChord(c)) => chord(input, state, c),
         Some(client_message::Body::Text(t)) => text(input, t),
         Some(client_message::Body::Media(m)) => media(input, m),
         Some(client_message::Body::RunCommand(RunCommand { .. })) => Err((
@@ -192,6 +212,11 @@ pub fn release_held(input: &mut dyn InputBackend, state: &mut SessionState) {
     for b in state.held.drain() {
         if let Err(e) = input.button(b, false) {
             tracing::warn!("releasing {b:?} failed: {e}");
+        }
+    }
+    for k in state.held_keys.drain() {
+        if let Err(e) = input.key(k, false) {
+            tracing::warn!("releasing key {k:?} failed: {e}");
         }
     }
 }
@@ -474,6 +499,83 @@ mod tests {
                 Recorded::Key(HidUsage(0xE0), false),
             ]
         );
+    }
+
+    /// Records like `RecordingBackend` but fails to release one chosen key.
+    struct FailRelease {
+        inner: RecordingBackend,
+        fail: HidUsage,
+    }
+
+    impl InputBackend for FailRelease {
+        fn move_relative(&mut self, dx: i32, dy: i32) -> Result<(), InputError> {
+            self.inner.move_relative(dx, dy)
+        }
+        fn button(&mut self, button: InMouse, down: bool) -> Result<(), InputError> {
+            self.inner.button(button, down)
+        }
+        fn scroll(&mut self, dx: f32, dy: f32) -> Result<(), InputError> {
+            self.inner.scroll(dx, dy)
+        }
+        fn key(&mut self, usage: HidUsage, down: bool) -> Result<(), InputError> {
+            // Record the attempt, then fail it.
+            self.inner.key(usage, down)?;
+            if usage == self.fail && !down {
+                return Err(InputError::Os("release failed".into()));
+            }
+            Ok(())
+        }
+        fn media(&mut self, key: MediaKey) -> Result<(), InputError> {
+            self.inner.media(key)
+        }
+        fn supports_text(&self) -> bool {
+            self.inner.supports_text()
+        }
+        fn text(&mut self, text: &str) -> Result<(), InputError> {
+            self.inner.text(text)
+        }
+    }
+
+    #[test]
+    fn chord_releases_every_key_even_if_one_release_fails() {
+        let (inner, h) = RecordingBackend::new(true);
+        let mut b = FailRelease {
+            inner,
+            fail: HidUsage(0xE1),
+        };
+        let mut s = SessionState::new();
+        let out = handle_client_message(
+            msg(
+                1,
+                client_message::Body::KeyChord(KeyChord {
+                    usages: vec![0xE0, 0xE1, 0x04],
+                }),
+            ),
+            &mut b,
+            &mut s,
+        );
+        assert_eq!(error_code(&out), Some(ErrorCode::Internal));
+        assert_eq!(
+            h.events(),
+            vec![
+                Recorded::Key(HidUsage(0xE0), true),
+                Recorded::Key(HidUsage(0xE1), true),
+                Recorded::Key(HidUsage(0x04), true),
+                Recorded::Key(HidUsage(0x04), false),
+                Recorded::Key(HidUsage(0xE1), false),
+                Recorded::Key(HidUsage(0xE0), false),
+            ]
+        );
+        assert_eq!(s.held_keys, HashSet::from([HidUsage(0xE1)]));
+
+        let before = h.events().len();
+        release_held(&mut b, &mut s);
+        assert_eq!(
+            h.events()[before..],
+            [Recorded::Key(HidUsage(0xE1), false)],
+            "the failed release is retried at session end"
+        );
+        assert!(s.held_keys.is_empty());
     }
 
     #[test]
