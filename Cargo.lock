@@ -671,6 +671,7 @@ dependencies = [
  "lanpilot-core",
  "lanpilot-input",
  "notify",
+ "prost",
  "qrcode",
  "serde",
  "serde_json",

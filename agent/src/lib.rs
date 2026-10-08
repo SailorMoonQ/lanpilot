@@ -6,6 +6,7 @@ pub mod fsutil;
 pub mod pairing;
 pub mod paths;
 pub mod secret;
+pub mod session;
 
 use lanpilot_core::pairing::password::PasswordError;
 
