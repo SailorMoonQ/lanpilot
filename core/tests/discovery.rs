@@ -16,6 +16,7 @@ async fn browser_finds_and_loses_advertiser() {
         proto_min: 1,
         proto_max: 1,
         port: 45999,
+        addrs: vec![],
     };
     let mut browser = Browser::start().unwrap();
     let advertiser = Advertiser::start(&ad).unwrap();

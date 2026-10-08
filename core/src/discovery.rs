@@ -8,7 +8,7 @@
 
 use crate::proto::v1::Os;
 use crate::text::sanitize_display_name;
-use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
+use mdns_sd::{IfKind, ServiceDaemon, ServiceEvent, ServiceInfo};
 use std::collections::HashMap;
 use std::net::IpAddr;
 
@@ -28,6 +28,11 @@ pub struct Advertisement {
     pub proto_min: u32,
     pub proto_max: u32,
     pub port: u16,
+    /// Addresses to publish. Empty lets mdns-sd choose (every non-loopback
+    /// interface, addresses tracked automatically). Non-empty publishes exactly
+    /// these addresses, and only on the interfaces that own them, so virtual
+    /// adapters (TUN, VPN) never carry the record.
+    pub addrs: Vec<IpAddr>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -170,23 +175,41 @@ pub struct Advertiser {
 }
 
 impl Advertiser {
-    /// Starts advertising `ad`. The advertised name is sanitized (see [`Advertisement::txt`]).
+    /// Starts advertising `ad`. The advertised name is sanitized (see
+    /// [`Advertisement::txt`]); see [`Advertisement::addrs`] for interface
+    /// selection. Loopback stays disabled (the mdns-sd default).
     pub fn start(ad: &Advertisement) -> Result<Self, DiscoveryError> {
+        let info = service_info(ad)?;
         let daemon = ServiceDaemon::new()?;
-        let props: HashMap<String, String> = ad.txt().into_iter().collect();
-        let info = ServiceInfo::new(
-            SERVICE_TYPE,
-            &ad.short_id,
-            &format!("{}.local.", ad.short_id),
-            "",
-            ad.port,
-            props,
-        )?
-        .enable_addr_auto();
+        if !ad.addrs.is_empty() {
+            daemon.disable_interface(IfKind::All)?;
+            for ip in &ad.addrs {
+                daemon.enable_interface(IfKind::Addr(*ip))?;
+            }
+        }
         let fullname = info.get_fullname().to_owned();
         daemon.register(info)?;
         Ok(Self { daemon, fullname })
     }
+}
+
+/// The service record for `ad`: exactly `ad.addrs` when non-empty, otherwise
+/// no addresses and mdns-sd's automatic address tracking.
+fn service_info(ad: &Advertisement) -> Result<ServiceInfo, DiscoveryError> {
+    let props: HashMap<String, String> = ad.txt().into_iter().collect();
+    let info = ServiceInfo::new(
+        SERVICE_TYPE,
+        &ad.short_id,
+        &format!("{}.local.", ad.short_id),
+        ad.addrs.as_slice(),
+        ad.port,
+        props,
+    )?;
+    Ok(if ad.addrs.is_empty() {
+        info.enable_addr_auto()
+    } else {
+        info
+    })
 }
 
 impl Drop for Advertiser {
@@ -258,7 +281,32 @@ mod tests {
             proto_min: 1,
             proto_max: 2,
             port: 45810,
+            addrs: vec![],
         }
+    }
+
+    #[test]
+    fn explicit_addrs_are_published_exactly() {
+        let a: IpAddr = "192.168.50.203".parse().unwrap();
+        let b: IpAddr = "10.0.0.7".parse().unwrap();
+        let mut ad = ad();
+        ad.addrs = vec![a, b];
+        let info = service_info(&ad).unwrap();
+        assert!(!info.is_addr_auto());
+        let got: std::collections::HashSet<IpAddr> = info.get_addresses().clone();
+        assert_eq!(got, [a, b].into_iter().collect());
+        assert_eq!(
+            info.get_fullname(),
+            "0123456789abcdef._lanpilot._udp.local."
+        );
+        assert_eq!(info.get_port(), 45810);
+    }
+
+    #[test]
+    fn empty_addrs_keep_auto_mode() {
+        let info = service_info(&ad()).unwrap();
+        assert!(info.is_addr_auto());
+        assert!(info.get_addresses().is_empty());
     }
 
     #[test]

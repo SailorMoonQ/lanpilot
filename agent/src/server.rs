@@ -97,6 +97,7 @@ impl Agent {
             proto_min: PROTO_MIN,
             proto_max: PROTO_MAX,
             port,
+            addrs: vec![],
         })
         .map_err(|e| AgentError::Core(e.to_string()))
     }
