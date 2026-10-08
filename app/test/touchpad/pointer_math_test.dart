@@ -59,6 +59,12 @@ void main() {
     expect(zoomSteps(1), 0);
   });
 
+  test('zoomSteps: a degenerate ratio is no zoom', () {
+    for (final ratio in [0.0, -1.0, double.nan, double.infinity]) {
+      expect(zoomSteps(ratio), 0, reason: '$ratio');
+    }
+  });
+
   test('SpeedTracker smooths instant speed', () {
     final t = SpeedTracker();
     expect(t.update(const Offset(1, 0), ms(0)), 0);

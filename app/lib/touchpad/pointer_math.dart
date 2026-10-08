@@ -37,9 +37,12 @@ Offset scrollNotches(
   return natural ? Offset(-n.dx, n.dy) : Offset(n.dx, -n.dy);
 }
 
-/// Pinch spread ratio to zoom steps; positive zooms in.
-double zoomSteps(double scaleRatio) =>
-    math.log(scaleRatio) / math.ln2 * Tuning.zoomStepsPerDoubling;
+/// Pinch spread ratio to zoom steps; positive zooms in. A ratio that is not
+/// a finite positive number (a pinch that collapsed to a point) is no zoom.
+double zoomSteps(double scaleRatio) {
+  if (!scaleRatio.isFinite || scaleRatio <= 0) return 0;
+  return math.log(scaleRatio) / math.ln2 * Tuning.zoomStepsPerDoubling;
+}
 
 /// Smoothed finger speed in pt/s.
 class SpeedTracker {
