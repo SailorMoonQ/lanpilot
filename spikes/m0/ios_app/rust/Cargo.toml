@@ -1,0 +1,28 @@
+[package]
+name = "rust_lib_lanpilot_spike"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "staticlib"]
+
+# Standalone: not a member of the root LanPilot workspace.
+[workspace]
+
+[dependencies]
+flutter_rust_bridge = "=2.13.0"
+lanpilot-core = { path = "../../../../core" }
+anyhow = "1"
+hex = "0.4"
+prost = "0.13"
+# libc 0.2.190 gates _dyld_* to macOS only, which breaks backtrace (via
+# flutter_rust_bridge -> allo-isolate) on aarch64-apple-ios.
+libc = "=0.2.189"
+tokio = { version = "1", features = ["rt-multi-thread", "time", "sync", "macros", "net"] }
+
+[profile.release]
+strip = "debuginfo"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(frb_expand)'] }
