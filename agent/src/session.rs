@@ -11,7 +11,10 @@ use lanpilot_core::proto::v1::{
 };
 use lanpilot_core::quinn;
 use lanpilot_core::transport::{DELIVERY_TIMEOUT, finish_and_confirm};
-use lanpilot_input::{HidUsage, InputBackend, InputError, MediaKey, MouseButton as InMouse};
+use lanpilot_input::{
+    HidUsage, InputBackend, InputError, MAX_SCROLL_NOTCHES_PER_CALL, MediaKey,
+    MouseButton as InMouse,
+};
 use prost::Message;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -72,8 +75,14 @@ fn apply_delta(input: &mut dyn InputBackend, d: PointerDelta) {
     {
         tracing::debug!("pointer move failed: {e}");
     }
-    if (d.scroll_x != 0.0 || d.scroll_y != 0.0)
-        && let Err(e) = input.scroll(d.scroll_x, d.scroll_y)
+    // Bound every backend, not only the ones that clamp internally.
+    let limit = MAX_SCROLL_NOTCHES_PER_CALL;
+    let (sx, sy) = (
+        d.scroll_x.clamp(-limit, limit),
+        d.scroll_y.clamp(-limit, limit),
+    );
+    if (sx != 0.0 || sy != 0.0)
+        && let Err(e) = input.scroll(sx, sy)
     {
         tracing::debug!("scroll failed: {e}");
     }
@@ -754,6 +763,27 @@ mod tests {
         );
         release_held(&mut b, &mut s);
         assert_eq!(h.events().len(), events.len(), "second release is a no-op");
+    }
+
+    #[test]
+    fn huge_scroll_is_clamped_before_the_backend() {
+        let (mut b, h) = RecordingBackend::new(true);
+        let mut s = SessionState::new();
+        let mut g = gs(1, 1, 0.0, 0.0);
+        g.total_scroll_x = -5.0e6;
+        g.total_scroll_y = 5.0e6;
+        apply_datagram(
+            &PointerDatagram { gesture: Some(g) }.encode_to_vec(),
+            &mut b,
+            &mut s,
+        );
+        assert_eq!(
+            h.events(),
+            vec![Recorded::Scroll(
+                -MAX_SCROLL_NOTCHES_PER_CALL,
+                MAX_SCROLL_NOTCHES_PER_CALL
+            )]
+        );
     }
 
     #[test]

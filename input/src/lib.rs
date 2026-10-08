@@ -15,6 +15,10 @@ pub mod windows;
 
 pub use keys::{HidUsage, SUPPORTED_KEYS, usage_from_name};
 
+/// Largest scroll, in notches per axis, one `scroll` call may produce. Larger
+/// requests are clamped by the agent and by the wheel accumulator.
+pub const MAX_SCROLL_NOTCHES_PER_CALL: f32 = 1000.0;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MouseButton {
     Left,
