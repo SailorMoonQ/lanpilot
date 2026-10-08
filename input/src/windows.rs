@@ -223,10 +223,21 @@ impl SendInputBackend {
         use windows_sys::Win32::UI::HiDpi::{
             DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
         };
-        // SAFETY: takes a constant context handle and no pointers. Returns
-        // FALSE if awareness was already set, which is fine to ignore. Without
-        // this, GetCursorPos reports virtualized coordinates on scaled displays.
-        unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
+        // Without per-monitor awareness, GetCursorPos reports virtualized
+        // coordinates on scaled displays.
+        // SAFETY: takes a constant context handle and no pointers.
+        let set =
+            unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
+        if set == 0 {
+            // FALSE when awareness was already set for this process. That is
+            // harmless if it was this same mode, but if a different mode was
+            // set (for example by a manifest), coordinates may be virtualized
+            // on mixed-DPI setups and absolute moves can land off target.
+            tracing::debug!(
+                "SetProcessDpiAwarenessContext failed: {}",
+                std::io::Error::last_os_error()
+            );
+        }
         Self {
             wheel: WheelAccumulator::default(),
             last: None,
@@ -428,6 +439,40 @@ mod tests {
             )
         };
         assert_ne!(equal, 0, "Default skipped the DPI awareness setup");
+    }
+
+    /// Counts DEBUG events from this module.
+    struct DebugEvents(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+    impl tracing::Subscriber for DebugEvents {
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn event(&self, e: &tracing::Event<'_>) {
+            if *e.metadata().level() == tracing::Level::DEBUG
+                && e.metadata().target() == module_path!().trim_end_matches("::tests")
+            {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+
+    #[test]
+    fn failed_dpi_awareness_setup_is_logged() {
+        let count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        tracing::subscriber::with_default(DebugEvents(count.clone()), || {
+            // Awareness can be set once per process, so the second call fails.
+            let _ = SendInputBackend::new();
+            let _ = SendInputBackend::new();
+        });
+        assert!(count.load(std::sync::atomic::Ordering::SeqCst) >= 1);
     }
 
     #[test]
