@@ -46,7 +46,8 @@ pub struct Client {
     app_version: String,
     /// Created at the first network call, never at app start: iOS shows the
     /// Local Network prompt then, and a socket created before access was
-    /// granted stays blocked (M0). `reset_endpoint` drops it.
+    /// granted stays blocked (M0). `reset_endpoint` drops this handle; an
+    /// old endpoint lives on only while its connections do.
     endpoint: tokio::sync::Mutex<Option<quinn::Endpoint>>,
     /// Serializes connect, disconnect and reset_endpoint.
     ops: tokio::sync::Mutex<()>,
@@ -182,14 +183,15 @@ impl Client {
         self.close_live(b"bye").await;
     }
 
-    /// Ends the session and drops the QUIC endpoint, so the next call binds a
-    /// fresh socket (spec 4.4).
+    /// Drops the cached QUIC endpoint, so the next pairing or connect binds a
+    /// fresh socket (spec 4.4). The live session is left alone: quinn keeps
+    /// an endpoint's driver and socket running while it has connections, so
+    /// a pairing retry does not end the session it runs beside. `connect`
+    /// closes and replaces the live session itself.
     pub async fn reset_endpoint(&self) {
         let _op = self.ops.lock().await;
-        self.close_live(b"reset").await;
-        if let Some(endpoint) = self.endpoint.lock().await.take() {
-            endpoint.close(0u32.into(), b"reset");
-        }
+        let old = self.endpoint.lock().await.take();
+        drop(old);
     }
 
     pub fn begin_gesture(&self) -> Result<(), BridgeError> {

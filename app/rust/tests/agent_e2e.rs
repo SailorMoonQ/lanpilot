@@ -414,10 +414,43 @@ async fn reset_endpoint_then_connect_works() {
         .await
         .unwrap();
     client.reset_endpoint().await;
-    assert_eq!(next_event(&mut events).await.reason, CloseReason::Local);
     let session = client
         .connect(&info.public_key_hex, &info.addrs)
         .await
         .unwrap();
     assert_eq!(session.generation, 2);
+    // The connect, not the reset, closed the first session.
+    let replaced = next_event(&mut events).await;
+    assert_eq!(
+        (replaced.generation, replaced.reason),
+        (1, CloseReason::Local)
+    );
+    client.media(MediaKind::Next).await.unwrap();
+}
+
+/// A pairing retry resets the endpoint while a session is live (spec 4.4).
+/// The live session must keep working: nothing would report its loss.
+#[tokio::test(flavor = "multi_thread")]
+async fn reset_endpoint_keeps_the_live_session() {
+    let h = Harness::start().await;
+    let (client, info) = paired(&h).await;
+    let mut events = sink(&client);
+    client
+        .connect(&info.public_key_hex, &info.addrs)
+        .await
+        .unwrap();
+    client.reset_endpoint().await;
+    client.media(MediaKind::PlayPause).await.unwrap();
+    h.wait_for("media after the reset", |e| {
+        e.contains(&Recorded::Media(MediaKey::PlayPause))
+    })
+    .await;
+    let quiet = tokio::time::timeout(Duration::from_millis(500), events.recv()).await;
+    assert!(quiet.is_err(), "the live session closed: {quiet:?}");
+    let session = client
+        .connect(&info.public_key_hex, &info.addrs)
+        .await
+        .unwrap();
+    assert_eq!(session.generation, 2);
+    client.media(MediaKind::Next).await.unwrap();
 }

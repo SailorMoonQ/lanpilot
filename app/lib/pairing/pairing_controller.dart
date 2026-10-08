@@ -56,6 +56,10 @@ String pairingErrorText(BridgeError e, AppLocalizations l) => switch (e.kind) {
 /// attempt. If a timeout came from a connection that died after the token was
 /// sent, the retry finds the token consumed (badToken); that is reported as
 /// the original timeout, since the computer may in fact have paired.
+///
+/// The reset only drops the cached endpoint: a session that is live meanwhile
+/// (adding a second computer, or a wrong address typed while connected) keeps
+/// its socket and keeps working.
 class PairingController {
   PairingController(this._client, this._connection);
 
