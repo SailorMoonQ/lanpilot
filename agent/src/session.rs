@@ -101,6 +101,8 @@ pub struct SessionState {
     held: HashSet<InMouse>,
     /// Keys whose release failed; retried when the session ends.
     held_keys: HashSet<HidUsage>,
+    /// Zoom steps not yet sent, always within (-1, 1).
+    zoom_remainder: f32,
 }
 
 impl SessionState {
@@ -109,6 +111,7 @@ impl SessionState {
             applier: PointerApplier::new(),
             held: HashSet::new(),
             held_keys: HashSet::new(),
+            zoom_remainder: 0.0,
         }
     }
 }
@@ -160,6 +163,12 @@ fn apply_delta(input: &mut InputHub, d: PointerDelta) {
 
 const ZOOM_MODIFIER: HidUsage = HidUsage(0xE0); // left Ctrl
 
+/// Zooms by holding Ctrl around a vertical scroll.
+///
+/// Zoom sends whole wheel notches only: some apps step one zoom level per
+/// wheel message regardless of its size, and a bare Ctrl tap can trigger
+/// "show pointer location" / Find My Mouse. Fractional steps accumulate in
+/// `zoom_remainder` until they add up to a notch; until then nothing is sent.
 fn zoom(input: &mut InputHub, state: &mut SessionState, z: Zoom) -> Result<(), Failure> {
     if !z.steps.is_finite() {
         return Err(bad("zoom steps must be finite"));
@@ -168,8 +177,14 @@ fn zoom(input: &mut InputHub, state: &mut SessionState, z: Zoom) -> Result<(), F
         return Ok(());
     }
     let limit = MAX_SCROLL_NOTCHES_PER_CALL;
+    state.zoom_remainder += z.steps.clamp(-limit, limit);
+    let whole = state.zoom_remainder.trunc();
+    state.zoom_remainder -= whole;
+    if whole == 0.0 {
+        return Ok(());
+    }
     input.key(ZOOM_MODIFIER, true).map_err(from_input)?;
-    let scrolled = input.scroll(0.0, z.steps.clamp(-limit, limit));
+    let scrolled = input.scroll(0.0, whole);
     let released = release_keys(input, state, &[ZOOM_MODIFIER]);
     scrolled.map_err(from_input)?;
     released.map_err(from_input)
@@ -572,6 +587,97 @@ mod tests {
         );
     }
 
+    fn zoom_msg(id: u64, steps: f32) -> ClientMessage {
+        msg(id, client_message::Body::Zoom(Zoom { steps }))
+    }
+
+    #[test]
+    fn zoom_sends_whole_notches_only() {
+        let (mut b, h) = hub(true);
+        let mut s = SessionState::new();
+        assert!(is_ack(
+            &handle_client_message(zoom_msg(1, 0.4), &mut b, &mut s),
+            1
+        ));
+        assert!(is_ack(
+            &handle_client_message(zoom_msg(2, 0.4), &mut b, &mut s),
+            2
+        ));
+        assert!(h.events().is_empty(), "no Ctrl tap without a whole notch");
+        assert!(is_ack(
+            &handle_client_message(zoom_msg(3, 0.4), &mut b, &mut s),
+            3
+        ));
+        assert_eq!(
+            h.events(),
+            vec![
+                Recorded::Key(HidUsage(0xE0), true),
+                Recorded::Scroll(0.0, 1.0),
+                Recorded::Key(HidUsage(0xE0), false),
+            ]
+        );
+    }
+
+    #[test]
+    fn zoom_keeps_the_fractional_remainder() {
+        let (mut b, h) = hub(true);
+        let mut s = SessionState::new();
+        handle_client_message(zoom_msg(1, -2.5), &mut b, &mut s);
+        assert_eq!(h.events()[1], Recorded::Scroll(0.0, -2.0));
+        // The kept -0.5 completes a notch with the next -0.5.
+        handle_client_message(zoom_msg(2, -0.5), &mut b, &mut s);
+        assert_eq!(h.events()[4], Recorded::Scroll(0.0, -1.0));
+        assert_eq!(h.events().len(), 6);
+    }
+
+    #[test]
+    fn rejected_zoom_does_not_touch_the_remainder() {
+        let (mut b, h) = hub(true);
+        let mut s = SessionState::new();
+        handle_client_message(zoom_msg(1, 0.6), &mut b, &mut s);
+        let nan = handle_client_message(zoom_msg(2, f32::NAN), &mut b, &mut s);
+        assert_eq!(error_code(&nan), Some(ErrorCode::BadRequest));
+        let inf = handle_client_message(zoom_msg(3, f32::INFINITY), &mut b, &mut s);
+        assert_eq!(error_code(&inf), Some(ErrorCode::BadRequest));
+        handle_client_message(zoom_msg(4, 0.6), &mut b, &mut s);
+        assert!(h.events().contains(&Recorded::Scroll(0.0, 1.0)));
+    }
+
+    #[test]
+    fn zoom_releases_ctrl_when_the_scroll_fails() {
+        let (inner, h) = RecordingBackend::new(true);
+        let mut b = InputHub::new(Box::new(Failing {
+            inner,
+            fail_release: None,
+            fail_scroll: true,
+        }));
+        let mut s = SessionState::new();
+        let out = handle_client_message(zoom_msg(1, 1.0), &mut b, &mut s);
+        assert_eq!(error_code(&out), Some(ErrorCode::Internal));
+        assert_eq!(
+            h.events(),
+            vec![
+                Recorded::Key(HidUsage(0xE0), true),
+                Recorded::Key(HidUsage(0xE0), false),
+            ]
+        );
+        assert!(s.held_keys.is_empty());
+    }
+
+    #[test]
+    fn zoom_tracks_a_failed_ctrl_release() {
+        let (inner, _h) = RecordingBackend::new(true);
+        let mut b = InputHub::new(Box::new(Failing {
+            inner,
+            fail_release: Some(HidUsage(0xE0)),
+            fail_scroll: false,
+        }));
+        let mut s = SessionState::new();
+        let out = handle_client_message(zoom_msg(1, 1.0), &mut b, &mut s);
+        assert_eq!(error_code(&out), Some(ErrorCode::Internal));
+        assert_eq!(s.held_keys, HashSet::from([HidUsage(0xE0)]));
+    }
+
     #[test]
     fn button_with_gesture_catches_up_then_clicks() {
         let (mut b, h) = hub(true);
@@ -652,13 +758,15 @@ mod tests {
         );
     }
 
-    /// Records like `RecordingBackend` but fails to release one chosen key.
-    struct FailRelease {
+    /// Records like `RecordingBackend` but can fail to release one chosen key
+    /// or fail every scroll. Failed scrolls are not recorded.
+    struct Failing {
         inner: RecordingBackend,
-        fail: HidUsage,
+        fail_release: Option<HidUsage>,
+        fail_scroll: bool,
     }
 
-    impl InputBackend for FailRelease {
+    impl InputBackend for Failing {
         fn move_relative(&mut self, dx: i32, dy: i32) -> Result<(), InputError> {
             self.inner.move_relative(dx, dy)
         }
@@ -666,12 +774,15 @@ mod tests {
             self.inner.button(button, down)
         }
         fn scroll(&mut self, dx: f32, dy: f32) -> Result<(), InputError> {
+            if self.fail_scroll {
+                return Err(InputError::Os("scroll failed".into()));
+            }
             self.inner.scroll(dx, dy)
         }
         fn key(&mut self, usage: HidUsage, down: bool) -> Result<(), InputError> {
             // Record the attempt, then fail it.
             self.inner.key(usage, down)?;
-            if usage == self.fail && !down {
+            if self.fail_release == Some(usage) && !down {
                 return Err(InputError::Os("release failed".into()));
             }
             Ok(())
@@ -690,9 +801,10 @@ mod tests {
     #[test]
     fn chord_releases_every_key_even_if_one_release_fails() {
         let (inner, h) = RecordingBackend::new(true);
-        let mut b = InputHub::new(Box::new(FailRelease {
+        let mut b = InputHub::new(Box::new(Failing {
             inner,
-            fail: HidUsage(0xE1),
+            fail_release: Some(HidUsage(0xE1)),
+            fail_scroll: false,
         }));
         let mut s = SessionState::new();
         let out = handle_client_message(
