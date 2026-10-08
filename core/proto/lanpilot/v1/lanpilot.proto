@@ -46,6 +46,7 @@ message ClientMessage {
     Media media = 13;
     RunCommand run_command = 14;
     Unpair unpair = 15;
+    Zoom zoom = 16;
   }
 }
 
@@ -113,6 +114,12 @@ enum MediaAction {
 
 message Media {
   MediaAction action = 1;
+}
+
+// Pinch zoom: Ctrl + wheel on the PC. steps > 0 zooms in. Agents advertise
+// the "zoom" capability; clients without it must not send this.
+message Zoom {
+  float steps = 1;
 }
 
 message RunCommand {

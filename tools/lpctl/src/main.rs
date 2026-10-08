@@ -55,6 +55,12 @@ enum Command {
         #[arg(allow_negative_numbers = true)]
         notches: f32,
     },
+    /// Pinch zoom: Ctrl + wheel; positive zooms in.
+    Zoom {
+        server: String,
+        #[arg(allow_negative_numbers = true)]
+        steps: f32,
+    },
     /// Press a chord, e.g. `lpctl key desk ctrl c`.
     Key {
         server: String,
@@ -147,6 +153,7 @@ async fn real_main(cli: Cli) -> Result<(), LpctlError> {
             action_for(server, Action::Click(b))
         }
         Command::Scroll { server, notches } => action_for(server, Action::Scroll(notches)),
+        Command::Zoom { server, steps } => action_for(server, Action::Zoom(steps)),
         Command::Key { server, names } => {
             let usages = names
                 .iter()
@@ -179,6 +186,8 @@ mod tests {
     fn negative_numbers_parse_as_values() {
         let cli = Cli::try_parse_from(["lpctl", "scroll", "desk", "-3"]).unwrap();
         assert!(matches!(cli.command, Command::Scroll { notches, .. } if notches == -3.0));
+        let cli = Cli::try_parse_from(["lpctl", "zoom", "desk", "-2"]).unwrap();
+        assert!(matches!(cli.command, Command::Zoom { steps, .. } if steps == -2.0));
         let cli = Cli::try_parse_from(["lpctl", "move", "desk", "-50", "20"]).unwrap();
         assert!(matches!(cli.command, Command::Move { dx, dy, .. } if dx == -50.0 && dy == 20.0));
     }

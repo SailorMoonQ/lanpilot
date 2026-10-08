@@ -267,6 +267,17 @@ fn v1_unpair() {
 }
 
 #[test]
+fn v1_zoom() {
+    check(
+        "v1_zoom",
+        ClientMessage {
+            request_id: 0,
+            body: Some(client_message::Body::Zoom(Zoom { steps: -1.5 })),
+        },
+    );
+}
+
+#[test]
 fn v1_command_list() {
     check(
         "v1_command_list",

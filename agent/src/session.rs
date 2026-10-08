@@ -6,7 +6,7 @@ use lanpilot_core::identity::PublicKey;
 use lanpilot_core::pointer::{PointerApplier, PointerDelta};
 use lanpilot_core::proto::v1::{
     Ack, ClientMessage, Error as ProtoError, ErrorCode, GestureState, KeyChord, Media, MediaAction,
-    MouseButton, PointerButton, PointerDatagram, RunCommand, ServerMessage, Text, Unpair,
+    MouseButton, PointerButton, PointerDatagram, RunCommand, ServerMessage, Text, Unpair, Zoom,
     client_message, server_message,
 };
 use lanpilot_core::quinn;
@@ -158,6 +158,23 @@ fn apply_delta(input: &mut InputHub, d: PointerDelta) {
     }
 }
 
+const ZOOM_MODIFIER: HidUsage = HidUsage(0xE0); // left Ctrl
+
+fn zoom(input: &mut InputHub, state: &mut SessionState, z: Zoom) -> Result<(), Failure> {
+    if !z.steps.is_finite() {
+        return Err(bad("zoom steps must be finite"));
+    }
+    if z.steps == 0.0 {
+        return Ok(());
+    }
+    let limit = MAX_SCROLL_NOTCHES_PER_CALL;
+    input.key(ZOOM_MODIFIER, true).map_err(from_input)?;
+    let scrolled = input.scroll(0.0, z.steps.clamp(-limit, limit));
+    let released = release_keys(input, state, &[ZOOM_MODIFIER]);
+    scrolled.map_err(from_input)?;
+    released.map_err(from_input)
+}
+
 fn apply_gesture(input: &mut InputHub, state: &mut SessionState, g: &GestureState) {
     if let Some(d) = state.applier.apply(g) {
         apply_delta(input, d);
@@ -259,6 +276,7 @@ pub fn handle_client_message(
         Some(client_message::Body::KeyChord(c)) => chord(input, state, c),
         Some(client_message::Body::Text(t)) => text(input, t),
         Some(client_message::Body::Media(m)) => media(input, m),
+        Some(client_message::Body::Zoom(z)) => zoom(input, state, z),
         Some(client_message::Body::RunCommand(RunCommand { .. })) => Err((
             ErrorCode::Unsupported,
             "shortcut commands are not available yet".into(),
@@ -504,6 +522,54 @@ mod tests {
 
     fn is_ack(h: &Handled, id: u64) -> bool {
         matches!(h.reply.as_ref(), Some(ServerMessage { request_id, body: Some(server_message::Body::Ack(_)) }) if *request_id == id)
+    }
+
+    #[test]
+    fn zoom_holds_ctrl_around_the_scroll() {
+        let (mut b, h) = hub(true);
+        let mut s = SessionState::new();
+        let out = handle_client_message(
+            msg(3, client_message::Body::Zoom(Zoom { steps: 2.0 })),
+            &mut b,
+            &mut s,
+        );
+        assert!(is_ack(&out, 3));
+        assert_eq!(
+            h.events(),
+            vec![
+                Recorded::Key(HidUsage(0xE0), true),
+                Recorded::Scroll(0.0, 2.0),
+                Recorded::Key(HidUsage(0xE0), false),
+            ]
+        );
+    }
+
+    #[test]
+    fn zoom_validates_steps() {
+        let (mut b, h) = hub(true);
+        let mut s = SessionState::new();
+        let nan = handle_client_message(
+            msg(1, client_message::Body::Zoom(Zoom { steps: f32::NAN })),
+            &mut b,
+            &mut s,
+        );
+        assert_eq!(error_code(&nan), Some(ErrorCode::BadRequest));
+        let zero = handle_client_message(
+            msg(2, client_message::Body::Zoom(Zoom { steps: 0.0 })),
+            &mut b,
+            &mut s,
+        );
+        assert!(is_ack(&zero, 2));
+        assert!(h.events().is_empty(), "NaN and zero touch nothing");
+        handle_client_message(
+            msg(3, client_message::Body::Zoom(Zoom { steps: 1.0e9 })),
+            &mut b,
+            &mut s,
+        );
+        assert!(
+            h.events()
+                .contains(&Recorded::Scroll(0.0, MAX_SCROLL_NOTCHES_PER_CALL))
+        );
     }
 
     #[test]
