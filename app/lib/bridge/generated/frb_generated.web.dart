@@ -6,6 +6,9 @@
 // Static analysis wrongly picks the IO variant, thus ignore this
 // ignore_for_file: argument_type_not_assignable
 
+import 'api/bridge.dart';
+import 'api/types.dart';
+
 import 'dart:async';
 import 'dart:convert';
 
@@ -22,25 +25,339 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   });
 
   @protected
+  AnyhowException dco_decode_AnyhowException(dynamic raw);
+
+  @protected
+  Map<String, String> dco_decode_Map_String_String_None(dynamic raw);
+
+  @protected
+  RustStreamSink<ConnectionEvent> dco_decode_StreamSink_connection_event_Sse(
+    dynamic raw,
+  );
+
+  @protected
+  String dco_decode_String(dynamic raw);
+
+  @protected
+  bool dco_decode_bool(dynamic raw);
+
+  @protected
+  DiscoveredInfo dco_decode_box_autoadd_discovered_info(dynamic raw);
+
+  @protected
+  BridgeError dco_decode_bridge_error(dynamic raw);
+
+  @protected
+  CloseReason dco_decode_close_reason(dynamic raw);
+
+  @protected
+  ConnectionEvent dco_decode_connection_event(dynamic raw);
+
+  @protected
+  DiscoveredInfo dco_decode_discovered_info(dynamic raw);
+
+  @protected
+  ErrorKind dco_decode_error_kind(dynamic raw);
+
+  @protected
+  double dco_decode_f_32(dynamic raw);
+
+  @protected
+  double dco_decode_f_64(dynamic raw);
+
+  @protected
+  int dco_decode_i_32(dynamic raw);
+
+  @protected
+  List<String> dco_decode_list_String(dynamic raw);
+
+  @protected
+  List<int> dco_decode_list_prim_u_32_loose(dynamic raw);
+
+  @protected
+  Uint32List dco_decode_list_prim_u_32_strict(dynamic raw);
+
+  @protected
+  List<int> dco_decode_list_prim_u_8_loose(dynamic raw);
+
+  @protected
+  Uint8List dco_decode_list_prim_u_8_strict(dynamic raw);
+
+  @protected
+  List<(String, String)> dco_decode_list_record_string_string(dynamic raw);
+
+  @protected
+  MediaKind dco_decode_media_kind(dynamic raw);
+
+  @protected
+  MouseButtonKind dco_decode_mouse_button_kind(dynamic raw);
+
+  @protected
+  DiscoveredInfo? dco_decode_opt_box_autoadd_discovered_info(dynamic raw);
+
+  @protected
+  OsKind dco_decode_os_kind(dynamic raw);
+
+  @protected
+  PairedServerInfo dco_decode_paired_server_info(dynamic raw);
+
+  @protected
+  (String, String) dco_decode_record_string_string(dynamic raw);
+
+  @protected
+  SessionInfo dco_decode_session_info(dynamic raw);
+
+  @protected
+  int dco_decode_u_16(dynamic raw);
+
+  @protected
+  int dco_decode_u_32(dynamic raw);
+
+  @protected
+  int dco_decode_u_8(dynamic raw);
+
+  @protected
   void dco_decode_unit(dynamic raw);
 
   @protected
-  void sse_decode_unit(SseDeserializer deserializer);
+  AnyhowException sse_decode_AnyhowException(SseDeserializer deserializer);
 
   @protected
-  int sse_decode_i_32(SseDeserializer deserializer);
+  Map<String, String> sse_decode_Map_String_String_None(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  RustStreamSink<ConnectionEvent> sse_decode_StreamSink_connection_event_Sse(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  String sse_decode_String(SseDeserializer deserializer);
 
   @protected
   bool sse_decode_bool(SseDeserializer deserializer);
 
   @protected
-  void sse_encode_unit(void self, SseSerializer serializer);
+  DiscoveredInfo sse_decode_box_autoadd_discovered_info(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  BridgeError sse_decode_bridge_error(SseDeserializer deserializer);
+
+  @protected
+  CloseReason sse_decode_close_reason(SseDeserializer deserializer);
+
+  @protected
+  ConnectionEvent sse_decode_connection_event(SseDeserializer deserializer);
+
+  @protected
+  DiscoveredInfo sse_decode_discovered_info(SseDeserializer deserializer);
+
+  @protected
+  ErrorKind sse_decode_error_kind(SseDeserializer deserializer);
+
+  @protected
+  double sse_decode_f_32(SseDeserializer deserializer);
+
+  @protected
+  double sse_decode_f_64(SseDeserializer deserializer);
+
+  @protected
+  int sse_decode_i_32(SseDeserializer deserializer);
+
+  @protected
+  List<String> sse_decode_list_String(SseDeserializer deserializer);
+
+  @protected
+  List<int> sse_decode_list_prim_u_32_loose(SseDeserializer deserializer);
+
+  @protected
+  Uint32List sse_decode_list_prim_u_32_strict(SseDeserializer deserializer);
+
+  @protected
+  List<int> sse_decode_list_prim_u_8_loose(SseDeserializer deserializer);
+
+  @protected
+  Uint8List sse_decode_list_prim_u_8_strict(SseDeserializer deserializer);
+
+  @protected
+  List<(String, String)> sse_decode_list_record_string_string(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  MediaKind sse_decode_media_kind(SseDeserializer deserializer);
+
+  @protected
+  MouseButtonKind sse_decode_mouse_button_kind(SseDeserializer deserializer);
+
+  @protected
+  DiscoveredInfo? sse_decode_opt_box_autoadd_discovered_info(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  OsKind sse_decode_os_kind(SseDeserializer deserializer);
+
+  @protected
+  PairedServerInfo sse_decode_paired_server_info(SseDeserializer deserializer);
+
+  @protected
+  (String, String) sse_decode_record_string_string(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  SessionInfo sse_decode_session_info(SseDeserializer deserializer);
+
+  @protected
+  int sse_decode_u_16(SseDeserializer deserializer);
+
+  @protected
+  int sse_decode_u_32(SseDeserializer deserializer);
+
+  @protected
+  int sse_decode_u_8(SseDeserializer deserializer);
+
+  @protected
+  void sse_decode_unit(SseDeserializer deserializer);
+
+  @protected
+  void sse_encode_AnyhowException(
+    AnyhowException self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_Map_String_String_None(
+    Map<String, String> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_StreamSink_connection_event_Sse(
+    RustStreamSink<ConnectionEvent> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_String(String self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_bool(bool self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_box_autoadd_discovered_info(
+    DiscoveredInfo self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_bridge_error(BridgeError self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_close_reason(CloseReason self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_connection_event(
+    ConnectionEvent self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_discovered_info(
+    DiscoveredInfo self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_error_kind(ErrorKind self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_f_32(double self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_f_64(double self, SseSerializer serializer);
 
   @protected
   void sse_encode_i_32(int self, SseSerializer serializer);
 
   @protected
-  void sse_encode_bool(bool self, SseSerializer serializer);
+  void sse_encode_list_String(List<String> self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_list_prim_u_32_loose(
+    List<int> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_prim_u_32_strict(
+    Uint32List self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_prim_u_8_loose(List<int> self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_list_prim_u_8_strict(
+    Uint8List self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_record_string_string(
+    List<(String, String)> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_media_kind(MediaKind self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_mouse_button_kind(
+    MouseButtonKind self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_opt_box_autoadd_discovered_info(
+    DiscoveredInfo? self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_os_kind(OsKind self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_paired_server_info(
+    PairedServerInfo self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_record_string_string(
+    (String, String) self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_session_info(SessionInfo self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_u_16(int self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_u_32(int self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_u_8(int self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_unit(void self, SseSerializer serializer);
 }
 
 // Section: wire_class
