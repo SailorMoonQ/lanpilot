@@ -10,7 +10,7 @@ use lanpilot_core::proto::v1::{
     client_message, server_message,
 };
 use lanpilot_core::quinn;
-use lanpilot_core::transport::finish_and_confirm;
+use lanpilot_core::transport::{DELIVERY_TIMEOUT, finish_and_confirm};
 use lanpilot_input::{HidUsage, InputBackend, InputError, MediaKey, MouseButton as InMouse};
 use prost::Message;
 use std::collections::HashSet;
@@ -196,6 +196,34 @@ pub fn release_held(input: &mut dyn InputBackend, state: &mut SessionState) {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum ExitPlan {
+    /// The reader saw an Unpair.
+    Unpair,
+    /// The reader ended by itself (stream finished or failed).
+    ReaderDone,
+    /// The connection closed before the reader finished.
+    ConnectionClosed,
+}
+
+fn exit_plan(reader_result: Option<bool>) -> ExitPlan {
+    match reader_result {
+        Some(true) => ExitPlan::Unpair,
+        Some(false) => ExitPlan::ReaderDone,
+        None => ExitPlan::ConnectionClosed,
+    }
+}
+
+/// Waits for the writer to flush and finish, but not longer than the
+/// delivery timeout: a peer that stops reading must not hold the session.
+async fn drain_writer(mut writer: tokio::task::JoinHandle<()>) {
+    let drained = tokio::time::timeout(DELIVERY_TIMEOUT, &mut writer).await;
+    if drained.is_err() {
+        writer.abort();
+        let _ = writer.await;
+    }
+}
+
 /// Runs one authorized session until the connection ends, the client stops,
 /// or the device is unpaired or removed. Always releases held buttons.
 pub async fn run_session(
@@ -288,19 +316,19 @@ pub async fn run_session(
     };
 
     // Biased: a reader result (notably an acknowledged Unpair) wins over a
-    // simultaneous connection close.
-    let (reader_result, closed_first) = tokio::select! {
+    // simultaneous connection close. `reader_result` is `Some` exactly when
+    // the reader's output was taken, so the handle is never awaited twice.
+    let reader_result: Option<bool> = tokio::select! {
         biased;
-        r = &mut reader => (Some(r.unwrap_or(false)), false),
+        r = &mut reader => Some(r.unwrap_or(false)),
         _ = conn.closed() => {
             if reader.is_finished() {
-                (Some((&mut reader).await.unwrap_or(false)), true)
+                Some((&mut reader).await.unwrap_or(false))
             } else {
-                (None, true)
+                None
             }
         }
     };
-    let unpaired = reader_result == Some(true);
 
     // No more pointer input and no watcher racing the close code below.
     datagrams.abort();
@@ -308,20 +336,24 @@ pub async fn run_session(
     let _ = (&mut datagrams).await;
     let _ = (&mut removal).await;
 
-    if unpaired {
-        let _ = writer.await; // the Ack is delivered before the device disappears
-        if let Err(e) = store.remove(&peer) {
-            tracing::error!("cannot remove unpaired device: {e}");
+    match exit_plan(reader_result) {
+        ExitPlan::Unpair => {
+            drain_writer(writer).await; // the Ack is delivered before the device disappears
+            if let Err(e) = store.remove(&peer) {
+                tracing::error!("cannot remove unpaired device: {e}");
+            }
+            conn.close(CLOSE_UNPAIRED.into(), b"unpaired");
         }
-        conn.close(CLOSE_UNPAIRED.into(), b"unpaired");
-    } else if closed_first {
-        reader.abort();
-        writer.abort();
-        let _ = (&mut reader).await;
-        let _ = writer.await;
-    } else {
-        let _ = writer.await; // drains replies and finishes the stream
-        conn.close(0u32.into(), b"session ended");
+        ExitPlan::ReaderDone => {
+            drain_writer(writer).await; // drains replies and finishes the stream
+            conn.close(0u32.into(), b"session ended");
+        }
+        ExitPlan::ConnectionClosed => {
+            reader.abort();
+            writer.abort();
+            let _ = (&mut reader).await;
+            let _ = writer.await;
+        }
     }
 
     // Every task has terminated; nothing can press after this release.
@@ -666,5 +698,12 @@ mod tests {
             other => panic!("unexpected close: {other:?}"),
         }
         assert!(handle.events().is_empty());
+    }
+
+    #[test]
+    fn exit_plan_covers_every_reader_state() {
+        assert_eq!(exit_plan(Some(true)), ExitPlan::Unpair);
+        assert_eq!(exit_plan(Some(false)), ExitPlan::ReaderDone);
+        assert_eq!(exit_plan(None), ExitPlan::ConnectionClosed);
     }
 }
