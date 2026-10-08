@@ -63,7 +63,12 @@ class ConnectionManager {
 
   int _attempt = 0;
   int _retryCount = 0;
+  int? _inFlight;
   bool _paused = false;
+  bool _disposed = false;
+
+  /// Closes that arrived for a session the manager has not recorded yet.
+  final _earlyCloses = <int, CloseReason>{};
   Timer? _retryTimer;
   Timer? _switcherTimer;
   StreamSubscription<ConnectionEvent>? _events;
@@ -95,6 +100,7 @@ class ConnectionManager {
   /// a drop use what is already known so they are not delayed.
   Future<void> connectTo(PairedServer server, {bool waitForMdns = true}) async {
     final attempt = ++_attempt;
+    _inFlight = attempt;
     _retryTimer?.cancel();
     final current = state.value;
     final same = current.server?.shortId == server.shortId;
@@ -125,7 +131,12 @@ class ConnectionManager {
     if (attempt != _attempt) return;
     final candidates = candidateAddrs(server, discovered);
     try {
-      final session = await _connectResetting(server.publicKeyHex, candidates);
+      final session = await _connectResetting(
+        attempt,
+        server.publicKeyHex,
+        candidates,
+        fresh: waitForMdns,
+      );
       if (attempt != _attempt) return;
       _retryCount = 0;
       _switcherTimer?.cancel();
@@ -134,10 +145,21 @@ class ConnectionManager {
         goodAddr: session.addr,
       );
       if (attempt != _attempt) return;
+      if (stored == null) {
+        // Forgotten while connecting: do not stay connected to it.
+        await _client.disconnect();
+        return;
+      }
+      final early = _earlyCloses[session.generation];
+      _earlyCloses.removeWhere((g, _) => g <= session.generation);
+      if (early != null && early != CloseReason.local) {
+        _handleClose(server, early);
+        return;
+      }
       _set(
         ConnState(
           status: ConnStatus.connected,
-          server: stored ?? server,
+          server: stored,
           session: session,
           showSwitcher: state.value.showSwitcher,
         ),
@@ -145,20 +167,29 @@ class ConnectionManager {
     } on BridgeError catch (e) {
       if (attempt != _attempt) return;
       await _onFailure(server, e);
+    } finally {
+      if (_inFlight == attempt) _inFlight = null;
     }
   }
 
+  /// A timeout on a fresh connect, or before the phone ever connected, gets
+  /// one more try on a new socket: a socket made before Local Network access
+  /// was granted stays blocked (spec 4.4). Backoff retries of a phone that
+  /// has connected before do not reset.
   Future<SessionInfo> _connectResetting(
+    int attempt,
     String key,
-    List<String> candidates,
-  ) async {
+    List<String> candidates, {
+    required bool fresh,
+  }) async {
     try {
       return await _client.connect(serverKeyHex: key, candidates: candidates);
     } on BridgeError catch (e) {
       if (e.kind != ErrorKind.timeout) rethrow;
-      // M0: a socket made before Local Network access was granted stays
-      // blocked, so try once more on a fresh one (spec 4.4).
+      if (!fresh && _store.everConnected) rethrow;
+      if (attempt != _attempt) rethrow;
       await _client.resetEndpoint();
+      if (attempt != _attempt) rethrow;
       return _client.connect(serverKeyHex: key, candidates: candidates);
     }
   }
@@ -196,6 +227,7 @@ class ConnectionManager {
   }) async {
     final attempt = ++_attempt;
     _retryTimer?.cancel();
+    _switcherTimer?.cancel();
     await _store.remove(server.shortId);
     if (attempt != _attempt) return;
     if (removedByComputer) {
@@ -211,10 +243,13 @@ class ConnectionManager {
   }
 
   void _scheduleRetry(PairedServer server) {
-    if (_paused) return;
+    if (_paused || _disposed) return;
     final delay = retryDelays[math.min(_retryCount, retryDelays.length - 1)];
     _retryCount++;
-    _retryTimer = Timer(delay, () => connectTo(server, waitForMdns: false));
+    _retryTimer = Timer(delay, () {
+      if (_store.byId(server.shortId) == null) return;
+      unawaited(connectTo(server, waitForMdns: false));
+    });
   }
 
   Future<void> retryNow() async {
@@ -228,10 +263,18 @@ class ConnectionManager {
   void _onEvent(ConnectionEvent event) {
     final current = state.value;
     final server = current.server;
-    if (server == null || current.session?.generation != event.generation) {
+    final known = current.session?.generation;
+    if (known == null || event.generation > known) {
+      // Not recorded yet: a connect may be about to return this session.
+      _earlyCloses[event.generation] = event.reason;
       return;
     }
-    switch (event.reason) {
+    if (server == null || known != event.generation) return;
+    _handleClose(server, event.reason);
+  }
+
+  void _handleClose(PairedServer server, CloseReason reason) {
+    switch (reason) {
       case CloseReason.local:
         return;
       case CloseReason.notPaired || CloseReason.deviceRemoved:
@@ -246,16 +289,20 @@ class ConnectionManager {
   Future<void> onPaused() async {
     if (_paused) return;
     _paused = true;
-    _attempt++;
+    final attempt = ++_attempt;
     _retryTimer?.cancel();
+    _switcherTimer?.cancel();
     final current = state.value;
     await input.releaseAll();
     await _client.disconnect();
-    if (current.server != null) {
-      _set(
-        current.copyWith(status: ConnStatus.reconnecting, clearSession: true),
-      );
-    }
+    if (attempt != _attempt || current.server == null) return;
+    final settled =
+        current.status == ConnStatus.failed &&
+        (current.reason == FailReason.removedByComputer ||
+            current.reason == FailReason.updateComputer ||
+            current.reason == FailReason.updateApp);
+    if (settled) return;
+    _set(current.copyWith(status: ConnStatus.reconnecting, clearSession: true));
   }
 
   Future<void> onResumed() async {
@@ -269,19 +316,21 @@ class ConnectionManager {
   }
 
   Future<void> onNetworkChanged() async {
-    final server = state.value.server;
-    if (_paused ||
-        server == null ||
-        state.value.status == ConnStatus.connecting) {
-      return;
-    }
+    final current = state.value;
+    final server = current.server;
+    if (_paused || server == null) return;
+    final idleFailed =
+        current.status == ConnStatus.failed && _inFlight != _attempt;
+    if (current.status != ConnStatus.connected && !idleFailed) return;
     if (_store.byId(server.shortId) == null) return;
+    _retryCount = 0;
     await connectTo(server);
   }
 
   Future<void> switchTo(PairedServer server) async {
     _attempt++;
     _retryTimer?.cancel();
+    _switcherTimer?.cancel();
     _retryCount = 0;
     if (state.value.status == ConnStatus.connected) {
       await input.releaseAll();
@@ -308,6 +357,7 @@ class ConnectionManager {
     if (isCurrent) {
       _attempt++;
       _retryTimer?.cancel();
+      _switcherTimer?.cancel();
       // Forget the session first so its close event is not treated as a drop.
       _set(current.copyWith(clearSession: true));
       if (current.status == ConnStatus.connected) {
@@ -320,6 +370,7 @@ class ConnectionManager {
     }
     await _store.remove(server.shortId);
     if (!isCurrent) return;
+    _attempt++;
     await _client.disconnect();
     final next = _store.lastUsed;
     if (next == null) {
@@ -330,10 +381,15 @@ class ConnectionManager {
   }
 
   void dispose() {
+    _disposed = true;
+    _attempt++;
     _retryTimer?.cancel();
     _switcherTimer?.cancel();
     unawaited(_events?.cancel());
+    state.dispose();
   }
 
-  void _set(ConnState next) => state.value = next;
+  void _set(ConnState next) {
+    if (!_disposed) state.value = next;
+  }
 }

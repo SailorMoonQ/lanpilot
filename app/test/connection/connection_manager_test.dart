@@ -374,6 +374,153 @@ void main() {
     });
   });
 
+  test('a close that arrives before the session is recorded reconnects', () {
+    fakeAsync((async) {
+      final r = Rig()..seed(async, [serverA()]);
+      final pending = Completer<SessionInfo>();
+      r.client.connectResults.addAll([pending, fakeSession(2)]);
+      r.start(async);
+      pending.complete(fakeSession(1));
+      r.client.closeSession(1, CloseReason.timedOut);
+      async.flushMicrotasks();
+      async.elapse(const Duration(seconds: 1));
+      expect(r.connects, hasLength(2));
+      expect(r.state.status, ConnStatus.connected);
+      expect(r.state.session!.generation, 2);
+    });
+  });
+
+  test('a switch during the first connect cancels the endpoint reset', () {
+    fakeAsync((async) {
+      final r = Rig()..seed(async, [serverA(), serverB()]);
+      final pendingA = Completer<SessionInfo>();
+      r.client.connectResults.addAll([pendingA, fakeSession(2)]);
+      r.start(async);
+      r.manager.switchTo(serverB());
+      async.elapse(const Duration(seconds: 2));
+      pendingA.completeError(bridgeError(ErrorKind.timeout));
+      async.flushMicrotasks();
+      expect(r.client.calls, isNot(contains('resetEndpoint')));
+      expect(r.connects, ['connect 10.0.0.1:45810', 'connect 10.0.0.2:45810']);
+      expect(r.state.status, ConnStatus.connected);
+      expect(r.state.server!.shortId, idB);
+    });
+  });
+
+  test('a pause during the first connect cancels the endpoint reset', () {
+    fakeAsync((async) {
+      final r = Rig()..seed(async, [serverA()]);
+      final pending = Completer<SessionInfo>();
+      r.client.connectResults.add(pending);
+      r.start(async);
+      r.manager.onPaused();
+      async.flushMicrotasks();
+      pending.completeError(bridgeError(ErrorKind.timeout));
+      async.elapse(const Duration(seconds: 30));
+      expect(r.client.calls, isNot(contains('resetEndpoint')));
+      expect(r.connects, hasLength(1));
+    });
+  });
+
+  test('pausing keeps a failure that does not retry', () {
+    fakeAsync((async) {
+      final r = Rig()..seed(async, [serverA()]);
+      r.client.connectResults.add(bridgeError(ErrorKind.notPaired));
+      r.start(async);
+      r.manager.onPaused();
+      async.flushMicrotasks();
+      r.manager.onResumed();
+      async.elapse(const Duration(seconds: 30));
+      expect(r.state.status, ConnStatus.failed);
+      expect(r.state.reason, FailReason.removedByComputer);
+      expect(r.connects, hasLength(1));
+    });
+  });
+
+  test('a network change while unpairing does not bring the computer back', () {
+    fakeAsync((async) {
+      final r = Rig()..seed(async, [serverA()]);
+      r.start(async);
+      final gate = Completer<void>();
+      r.client.unpairGate = gate;
+      r.manager.unpair(r.store.byId(idA)!);
+      async.flushMicrotasks();
+      r.manager.onNetworkChanged();
+      async.elapse(const Duration(seconds: 1));
+      gate.complete();
+      async.elapse(const Duration(seconds: 30));
+      expect(r.state.status, ConnStatus.unpaired);
+      expect(r.connects, hasLength(1));
+    });
+  });
+
+  test('a failed computer forgotten with a retry pending is not retried', () {
+    fakeAsync((async) {
+      final r = Rig()..seed(async, [serverA(), serverB()]);
+      r.client.connectResults.add(bridgeError(ErrorKind.unreachable));
+      r.start(async);
+      expect(r.state.status, ConnStatus.failed);
+      r.manager.unpair(r.store.byId(idA)!);
+      async.elapse(const Duration(seconds: 30));
+      expect(r.connects.where((c) => c.contains('10.0.0.1')), hasLength(1));
+      expect(r.state.server!.shortId, idB);
+    });
+  });
+
+  test('dispose stops work in flight', () {
+    fakeAsync((async) {
+      final r = Rig()..seed(async, [serverA()]);
+      final pending = Completer<SessionInfo>();
+      r.client.connectResults.add(pending);
+      r.start(async);
+      r.manager.dispose();
+      pending.completeError(bridgeError(ErrorKind.unreachable));
+      async.elapse(const Duration(seconds: 30));
+      expect(r.connects, hasLength(1));
+    });
+  });
+
+  test('switching cancels the startup switcher timer', () {
+    fakeAsync((async) {
+      final r = Rig()..seed(async, [serverA(), serverB()]);
+      r.client.connectResults.addAll([
+        Completer<SessionInfo>(),
+        Completer<SessionInfo>(),
+      ]);
+      r.manager.start();
+      async.elapse(const Duration(seconds: 3));
+      r.manager.switchTo(serverB());
+      async.elapse(const Duration(seconds: 3));
+      expect(r.state.showSwitcher, isFalse);
+    });
+  });
+
+  test('repeated network changes while reconnecting connect once', () {
+    fakeAsync((async) {
+      final r = Rig()..seed(async, [serverA()]);
+      r.start(async);
+      r.manager.onNetworkChanged();
+      r.manager.onNetworkChanged();
+      async.elapse(const Duration(seconds: 2));
+      expect(r.connects, hasLength(2));
+    });
+  });
+
+  test('a backoff retry of a phone that connected before does not reset', () {
+    fakeAsync((async) {
+      final r = Rig()..seed(async, [serverA()]);
+      r.client.connectResults.addAll([
+        bridgeError(ErrorKind.unreachable),
+        bridgeError(ErrorKind.timeout),
+      ]);
+      r.start(async);
+      async.elapse(const Duration(seconds: 1));
+      expect(r.client.calls, isNot(contains('resetEndpoint')));
+      expect(r.connects, hasLength(2));
+      expect(r.state.reason, FailReason.offline);
+    });
+  });
+
   test('candidateAddrs orders mdns, last good, then pairing addresses', () {
     final server = serverA(lastGood: '10.0.0.9:45810')
         .copyWith(addrs: ['10.0.0.1:45810', '10.0.0.9:45810']);

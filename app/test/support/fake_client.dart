@@ -144,8 +144,14 @@ class FakeLanPilotClient implements LanPilotClient {
   Future<void> zoom(double steps) =>
       _request('zoom ${steps.toStringAsFixed(2)}');
 
+  /// When set, unpair completes only after this does.
+  Completer<void>? unpairGate;
+
   @override
-  Future<void> unpair() => _request('unpair');
+  Future<void> unpair() async {
+    await _request('unpair');
+    await unpairGate?.future;
+  }
 
   Future<void> _request(String call) async {
     calls.add(call);
