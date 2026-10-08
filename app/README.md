@@ -18,7 +18,7 @@ Flutter app that controls a computer running `lanpilot-agent`. Design: `docs/sup
 
 ```
 (cd rust && cargo fmt --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked)
-dart format --output=none --set-exit-if-changed lib test integration_test
+dart format --output=none --set-exit-if-changed lib test integration_test packages/lanpilot_discovery/lib packages/lanpilot_discovery/test
 flutter analyze
 flutter test                      # goldens run on macOS only
 flutter test --update-goldens test/golden   # after intended UI changes

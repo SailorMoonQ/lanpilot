@@ -1,6 +1,14 @@
 # M2 real iPhone checklist
 
-Run before calling M2 done, with the user at the iPhone. Record the date, devices and results at the bottom. PC: run `lanpilot-agent run --pair` from the `feat/m2-agent` build (Windows), and on Ubuntu when available.
+Run before calling M2 done, with the user at the iPhone. Record the date, devices and results at the bottom. PC: run `lanpilot-agent run --pair` from a `main` build (Windows), and on Ubuntu when available.
+
+## Before you start
+
+- Build the agent from `main` (the agent work is merged).
+- Allow `lanpilot-agent` through the Windows firewall on private networks (UDP 45810).
+- Keep the phone and the PC on the same Wi-Fi. Find the PC's IP with `ipconfig`.
+- `lanpilot-agent password set` prompts for the password twice.
+- Settings is the gear on "Add computer", or "Settings" in the switcher sheet.
 
 ## Install
 
@@ -11,10 +19,10 @@ Run before calling M2 done, with the user at the iPhone. Record the date, device
 
 1. Fresh install. On "Add computer", wait: the iOS Local Network prompt appears (from browsing). Tap Allow. The PC appears under "Nearby computers".
 2. Pair (any method). It works without restarting the app. This is the M0 bug that M2 fixes.
-3. Delete the app, reinstall, and this time tap "Don't Allow". Pair by pasting a link: a clear error appears, not a hang. Pair anyway is impossible; then in iOS Settings > Privacy & Security > Local Network turn LanPilot on, come back and tap Pair again: it works, still without restarting.
+3. Delete the app, reinstall, and this time tap "Don't Allow". Pair by pasting a link: after two timeouts (roughly 10 s) it shows "Cannot reach the computer. Make sure both are on the same network.", not a hang. Then in iOS Settings > Privacy & Security > Local Network turn LanPilot on, come back and tap Pair again: it works, still without restarting.
    Variant: tap Pair, and while it is waiting allow access in the iOS prompt. Pairing resets the network socket and retries once after a timeout, so it succeeds without restarting the app.
-4. With a paired PC and access turned off in Settings: open the app. After a few seconds the touchpad shows the "Local network access needed" guide with "Open Settings" and "Retry". "Open Settings" opens the app's settings page. Turn access on, come back, tap "Retry": it connects.
-5. A phone that has never connected and keeps timing out also shows the "Local network access needed" guide.
+4. With a PC that was paired and connected before, turn Local Network off for LanPilot in iOS Settings and open the app: it shows "The computer is offline. Retrying..." and after about 5 s the switcher opens. Turn access on and come back: it connects.
+5. The "Local network access needed" guide (with "Open Settings" and "Retry") appears only for a paired computer on a phone that has never connected since install and keeps timing out. That is hard to reach by hand and is covered by automated tests. The manual path for the same cause is step 3: fresh install, "Don't Allow", paste a link, expect the "Cannot reach the computer" error above.
 
 ## Pairing (spec 1.1)
 
@@ -22,20 +30,20 @@ Run before calling M2 done, with the user at the iPhone. Record the date, device
 2. System camera: scan the PC's QR code with the iOS Camera app and tap the `lanpilot://` banner. LanPilot opens and pairs.
 3. Paste: copy the `lanpilot://pair?d=...` line (Universal Clipboard from the Mac is fine), tap the paste icon, then Pair.
 4. Paste junk ("hello"): "This is not a LanPilot pairing link."
-5. Wait 2 minutes, then paste an old link: "The pairing code expired..." Also scan an expired QR code in the scanner: a Retry button appears and the scanner does not loop on the same code.
+5. Paste a pairing link or scan a QR code older than 2 minutes (e.g. an earlier one in the terminal scrollback): "The pairing code expired..." In the scanner, an expired QR code shows a Retry button appears and the scanner does not loop on the same code.
 6. Password: on the PC `lanpilot-agent password set`, restart the agent. Tap the PC under "Nearby computers", enter the password. Then a wrong password: "Wrong password." Press the keyboard Done twice quickly on the password field: only one pairing starts (the PC counts one attempt, not two).
 7. Manual IP: "Enter IP address", type the PC's IP (no port) and the password. It pairs.
-8. The PC's device list (`lanpilot-agent devices list`) shows "iPhone" with OS iOS after each pairing.
+8. The PC's device list (`lanpilot-agent devices list`) shows "iPhone" with OS `Ios` (Debug format) after each pairing.
 
 ## Connection (spec 4)
 
-1. Kill and reopen the app: it connects to the last PC within about 1 s and opens the touchpad.
+1. Kill and reopen the app: it connects to the last PC within about 2 s (up to 1.5 s Bonjour wait plus connect) and opens the touchpad.
 2. With the PC agent stopped, open the app: the overlay says the PC is offline and retrying; after about 5 s the switcher opens. Start the agent: it connects by itself.
-3. Background: connect, go to the home screen for 10 s, come back: "Reconnecting..." then connected. The agent log shows a clean close (application close code 0) when the phone went to the background, not an idle timeout 3 s later. If it shows a timeout, iOS suspended the app before the close was sent: note it, it means the disconnect needs a background task (`beginBackgroundTask`).
+3. Background: connect, go to the home screen for 10 s, come back: "Reconnecting..." then connected. The agent logs "session started" and "session ended". Compare when "session ended" appears with when you swiped home: within about 1 s is a clean close; about 3 s later is an idle timeout. In that case iOS suspended the app before the close was sent: note it, it means the disconnect needs a background task (`beginBackgroundTask`).
 4. Background while holding: hold "Left" on the button strip, swipe to the home screen. On the PC the left button is released (a drag in progress ends).
 5. Wi-Fi: turn Wi-Fi off and on in Control Center. It reconnects without touching the app.
 6. Two PCs: pair both, switch with the switcher (top name), check the online and offline labels and the check mark.
-7. Unpair by swiping left in the switcher: the PC's device list no longer has the phone. Do this on the computer you are currently connected to as well: it works without a glitch.
+7. Unpair by swiping left in the switcher; a confirm dialog offers Unpair and Cancel. After confirming, the PC's device list no longer has the phone. Do this on the computer you are currently connected to as well: it works without a glitch.
    Open the switcher right after launch on a slow start: it opens only once.
 8. Stop the PC agent without Ctrl-C (kill it or crash it): the phone may still list it as nearby for a while. This is a stale Bonjour record; the agent side is being fixed in the Windows session.
 9. Sleep: the screen stays awake only on the touchpad tab. On the Media and Shortcuts tabs and under Settings, auto-lock lets the screen sleep.
