@@ -9,11 +9,19 @@ on:
       - "core/**"
       - "agent/**"
       - "input/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
       - ".github/workflows/app.yml"
+
+concurrency:
+  group: app-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   ios-app:
     runs-on: macos-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -23,7 +31,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: app/rust
-          cache-bin: true
       - uses: subosito/flutter-action@v2
         with:
           flutter-version: 3.47.5
@@ -46,6 +53,7 @@ jobs:
           dart format lib
           flutter gen-l10n
           git diff --exit-code
+          test -z "$(git status --porcelain)" || { git status --porcelain; exit 1; }
       - name: Dart
         working-directory: app
         run: |
@@ -53,6 +61,13 @@ jobs:
           flutter analyze
           flutter test
           (cd packages/lanpilot_discovery && flutter test)
+      - name: Upload golden failures
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: golden-failures
+          path: app/test/golden/failures
+          if-no-files-found: ignore
       - name: Build for iOS (no signing)
         working-directory: app
         run: flutter build ios --no-codesign
