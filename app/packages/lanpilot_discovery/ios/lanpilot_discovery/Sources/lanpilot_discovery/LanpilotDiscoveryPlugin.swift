@@ -25,6 +25,17 @@ public class LanpilotDiscoveryPlugin: NSObject, FlutterPlugin, FlutterStreamHand
   // Owned by the main thread.
   private var sink: FlutterEventSink?
 
+  /// Nothing else holds the plugin now, so its state can be read here; the
+  /// refs must still be deallocated on `queue`, where their callbacks run.
+  deinit {
+    let browser = browser
+    let pending = Array(resolvers.values)
+    queue.async {
+      browser?.cancel()
+      pending.forEach { $0.cancel() }
+    }
+  }
+
   public static func register(with registrar: FlutterPluginRegistrar) {
     let channel = FlutterEventChannel(
       name: "lanpilot/discovery", binaryMessenger: registrar.messenger())
@@ -124,6 +135,7 @@ public class LanpilotDiscoveryPlugin: NSObject, FlutterPlugin, FlutterStreamHand
     let resolver = Resolver(fullname: fullname, owner: self)
     resolvers[fullname] = resolver
     var ref: DNSServiceRef?
+    let context = Unmanaged.passRetained(resolver)
     let status = DNSServiceResolve(
       &ref, 0, 0, name, type, domain,
       { _, _, _, error, _, host, port, _, _, context in
@@ -132,12 +144,13 @@ public class LanpilotDiscoveryPlugin: NSObject, FlutterPlugin, FlutterStreamHand
         resolver.owner?.serviceResolved(
           resolver, error, host.map { String(cString: $0) } ?? "", UInt16(bigEndian: port))
       },
-      Unmanaged.passUnretained(resolver).toOpaque())
+      context.toOpaque())
     guard status == kDNSServiceErr_NoError, let ref else {
+      context.release()
       failed(fullname, resolver)
       return
     }
-    resolver.service = ref
+    resolver.service = Resolver.Lookup(ref: ref, context: context)
     guard DNSServiceSetDispatchQueue(ref, queue) == kDNSServiceErr_NoError else {
       failed(fullname, resolver)
       return
@@ -165,6 +178,7 @@ public class LanpilotDiscoveryPlugin: NSObject, FlutterPlugin, FlutterStreamHand
     // has no A record for the host (an agent on this Mac answers SRV on lo0
     // but A only on en0), and a lookup scoped to it never completes.
     var ref: DNSServiceRef?
+    let context = Unmanaged.passRetained(resolver)
     let status = DNSServiceGetAddrInfo(
       &ref, 0, 0, DNSServiceProtocol(kDNSServiceProtocol_IPv4), host,
       { _, flags, _, error, _, address, _, context in
@@ -174,12 +188,13 @@ public class LanpilotDiscoveryPlugin: NSObject, FlutterPlugin, FlutterStreamHand
         resolver.owner?.addressResolved(
           resolver, error, added ? address.flatMap(LanpilotDiscoveryPlugin.ipv4) : nil)
       },
-      Unmanaged.passUnretained(resolver).toOpaque())
+      context.toOpaque())
     guard status == kDNSServiceErr_NoError, let ref else {
+      context.release()
       failed(fullname, resolver)
       return
     }
-    resolver.address = ref
+    resolver.address = Resolver.Lookup(ref: ref, context: context)
     guard DNSServiceSetDispatchQueue(ref, queue) == kDNSServiceErr_NoError else {
       failed(fullname, resolver)
       return
@@ -252,13 +267,20 @@ public class LanpilotDiscoveryPlugin: NSObject, FlutterPlugin, FlutterStreamHand
 }
 
 /// One resolution attempt: the DNSServiceRefs it owns and the port it found.
-/// Used and cancelled only on the plugin's queue, so no callback arrives after
-/// `cancel()`.
+/// Each ref's callback context retains the Resolver until `cancel()`
+/// deallocates that ref, so a callback never sees a freed Resolver. Used and
+/// cancelled only on the plugin's queue, so no callback arrives after
+/// `cancel()`. Never deallocate refs in `deinit`: it may run off the queue.
 private final class Resolver {
+  struct Lookup {
+    let ref: DNSServiceRef
+    let context: Unmanaged<Resolver>
+  }
+
   let fullname: String
   weak var owner: LanpilotDiscoveryPlugin?
-  var service: DNSServiceRef?
-  var address: DNSServiceRef?
+  var service: Lookup?
+  var address: Lookup?
   var port: UInt16 = 0
 
   init(fullname: String, owner: LanpilotDiscoveryPlugin) {
@@ -266,9 +288,12 @@ private final class Resolver {
     self.owner = owner
   }
 
+  /// Deallocates both refs and releases their contexts; safe to call twice.
   func cancel() {
-    if let address { DNSServiceRefDeallocate(address) }
-    if let service { DNSServiceRefDeallocate(service) }
+    for lookup in [address, service].compactMap({ $0 }) {
+      DNSServiceRefDeallocate(lookup.ref)
+      lookup.context.release()
+    }
     address = nil
     service = nil
   }
