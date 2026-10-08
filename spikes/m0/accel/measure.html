@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pointer Burst Meter</title>
+<style>
+  :root { --bg: #fafafa; --fg: #1d1d1f; --muted: #6e6e73; --line: #d2d2d7; --accent: #0a84ff; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #1c1c1e; --fg: #f5f5f7; --muted: #98989d; --line: #3a3a3c; --accent: #64d2ff; } }
+  html, body { height: 100%; margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.5 system-ui, sans-serif; }
+  #target { position: fixed; inset: 0; cursor: crosshair; }
+  #cross { position: fixed; left: 50%; top: 50%; width: 24px; height: 24px; margin: -12px 0 0 -12px; border: 2px solid var(--accent); border-radius: 50%; pointer-events: none; }
+  #panel { position: fixed; top: 16px; left: 16px; right: 16px; max-width: 560px; pointer-events: none; }
+  table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
+  th, td { text-align: right; padding: 2px 8px; border-bottom: 1px solid var(--line); }
+  th:first-child, td:first-child { text-align: left; }
+  p { color: var(--muted); margin: 0 0 8px; }
+</style>
+</head>
+<body>
+<div id="target"></div>
+<div id="cross"></div>
+<div id="panel">
+  <p>Spike only. Bursts of pointer motion separated by 400 ms of stillness are measured as one row. Keep the cursor near the ring; alternate +400 and -400 moves to stay on screen. Press C to clear.</p>
+  <table><thead><tr><th>#</th><th>events</th><th>dx</th><th>dy</th><th>ms</th></tr></thead><tbody id="rows"></tbody></table>
+</div>
+<script>
+  const rows = document.getElementById('rows');
+  let burst = null, n = 0, timer = null;
+  function finish() {
+    if (!burst) return;
+    n += 1;
+    const tr = document.createElement('tr');
+    const cells = [n, burst.events, burst.x - burst.x0, burst.y - burst.y0, Math.round(burst.t - burst.t0)];
+    for (const v of cells) { const td = document.createElement('td'); td.textContent = v; tr.appendChild(td); }
+    rows.prepend(tr);
+    console.log(JSON.stringify({ burst: n, events: burst.events, dx: cells[2], dy: cells[3], ms: cells[4] }));
+    burst = null;
+  }
+  addEventListener('pointermove', (e) => {
+    const now = performance.now();
+    if (!burst) burst = { x0: e.screenX - e.movementX, y0: e.screenY - e.movementY, events: 0, t0: now };
+    burst.x = e.screenX; burst.y = e.screenY; burst.t = now; burst.events += 1;
+    clearTimeout(timer); timer = setTimeout(finish, 400);
+  });
+  addEventListener('keydown', (e) => { if (e.key === 'c' || e.key === 'C') { rows.textContent = ''; n = 0; } });
+</script>
+</body>
+</html>
