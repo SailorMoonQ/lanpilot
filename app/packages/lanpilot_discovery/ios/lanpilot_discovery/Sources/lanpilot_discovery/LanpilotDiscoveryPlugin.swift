@@ -1,10 +1,11 @@
 import Flutter
 import Network
 import UIKit
+import dnssd
 
-/// Browses `_lanpilot._udp` with NWBrowser and streams each service to Dart
-/// with its TXT record and one resolved IPv4 address. Dart validates every
-/// result with core; nothing here is trusted.
+/// Browses `_lanpilot._udp` with NWBrowser, resolves each service with dns_sd
+/// and streams it to Dart with its TXT record and one resolved IPv4 address.
+/// Dart validates every result with core; nothing here is trusted.
 public class LanpilotDiscoveryPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
   private static let maxAttempts = 3
   private static let resolveTimeout: TimeInterval = 5
@@ -16,7 +17,7 @@ public class LanpilotDiscoveryPlugin: NSObject, FlutterPlugin, FlutterStreamHand
   private var wantsBrowsing = false
   private var browser: NWBrowser?
   private var results: [String: NWBrowser.Result] = [:]
-  private var resolvers: [String: NWConnection] = [:]
+  private var resolvers: [String: Resolver] = [:]
   private var attempts: [String: Int] = [:]
   private var retries: [String: DispatchWorkItem] = [:]
   private var emitted: Set<String> = []
@@ -112,55 +113,117 @@ public class LanpilotDiscoveryPlugin: NSObject, FlutterPlugin, FlutterStreamHand
     attempt(fullname)
   }
 
-  /// A UDP NWConnection to the service resolves it; nothing is sent.
+  /// Resolves the service with dns_sd, as `dns-sd -L` and `dns-sd -G` do:
+  /// DNSServiceResolve for host and port, then DNSServiceGetAddrInfo for an
+  /// IPv4 address. Both run on `queue`.
   private func attempt(_ fullname: String) {
-    guard let result = results[fullname] else { return }
-    var txt: [String: String] = [:]
-    if case let .bonjour(record) = result.metadata { txt = record.dictionary }
+    guard let result = results[fullname],
+      case let .service(name, type, domain, _) = result.endpoint
+    else { return }
     resolvers.removeValue(forKey: fullname)?.cancel()
-    let params = NWParameters.udp
-    if let ip = params.defaultProtocolStack.internetProtocol as? NWProtocolIP.Options {
-      ip.version = .v4
+    let resolver = Resolver(fullname: fullname, owner: self)
+    resolvers[fullname] = resolver
+    var ref: DNSServiceRef?
+    let status = DNSServiceResolve(
+      &ref, 0, 0, name, type, domain,
+      { _, _, _, error, _, host, port, _, _, context in
+        guard let context else { return }
+        let resolver = Unmanaged<Resolver>.fromOpaque(context).takeUnretainedValue()
+        resolver.owner?.serviceResolved(
+          resolver, error, host.map { String(cString: $0) } ?? "", UInt16(bigEndian: port))
+      },
+      Unmanaged.passUnretained(resolver).toOpaque())
+    guard status == kDNSServiceErr_NoError, let ref else {
+      failed(fullname, resolver)
+      return
     }
-    let connection = NWConnection(to: result.endpoint, using: params)
-    resolvers[fullname] = connection
-    connection.stateUpdateHandler = { [weak self, weak connection] state in
-      guard let self, let connection, self.resolvers[fullname] === connection else { return }
-      switch state {
-      case .ready:
-        if case let .hostPort(host, port) = connection.currentPath?.remoteEndpoint,
-          case let .ipv4(address) = host
-        {
-          let text = "\(address)".split(separator: "%").first.map(String.init) ?? "\(address)"
-          self.resolvers.removeValue(forKey: fullname)
-          self.attempts[fullname] = 0
-          self.emitted.insert(fullname)
-          self.emit([
-            "event": "found", "fullname": fullname, "txt": txt,
-            "addrs": [text], "port": Int(port.rawValue),
-          ])
-          connection.cancel()
-        } else {
-          self.failed(fullname, connection)
-        }
-      case .failed, .waiting:
-        self.failed(fullname, connection)
-      default:
-        break
-      }
+    resolver.service = ref
+    guard DNSServiceSetDispatchQueue(ref, queue) == kDNSServiceErr_NoError else {
+      failed(fullname, resolver)
+      return
     }
-    connection.start(queue: queue)
-    queue.asyncAfter(deadline: .now() + Self.resolveTimeout) { [weak self, weak connection] in
-      guard let self, let connection, self.resolvers[fullname] === connection else { return }
-      self.failed(fullname, connection)
+    queue.asyncAfter(deadline: .now() + Self.resolveTimeout) { [weak self, weak resolver] in
+      guard let self, let resolver, self.resolvers[fullname] === resolver else { return }
+      self.failed(fullname, resolver)
     }
   }
 
-  /// Gives up on this connection and retries after a delay, a bounded number of times.
-  private func failed(_ fullname: String, _ connection: NWConnection) {
-    guard resolvers[fullname] === connection else { return }
+  /// The SRV record arrived: look up the host's IPv4 address.
+  private func serviceResolved(
+    _ resolver: Resolver, _ error: DNSServiceErrorType, _ host: String, _ port: UInt16
+  ) {
+    let fullname = resolver.fullname
+    guard resolvers[fullname] === resolver else { return }
+    guard error == kDNSServiceErr_NoError else {
+      failed(fullname, resolver)
+      return
+    }
+    // DNSServiceResolve reports the record once per interface; one lookup is enough.
+    guard resolver.address == nil else { return }
+    resolver.port = port
+    // Interface 0 on purpose: the SRV answer can come from an interface that
+    // has no A record for the host (an agent on this Mac answers SRV on lo0
+    // but A only on en0), and a lookup scoped to it never completes.
+    var ref: DNSServiceRef?
+    let status = DNSServiceGetAddrInfo(
+      &ref, 0, 0, DNSServiceProtocol(kDNSServiceProtocol_IPv4), host,
+      { _, flags, _, error, _, address, _, context in
+        guard let context else { return }
+        let resolver = Unmanaged<Resolver>.fromOpaque(context).takeUnretainedValue()
+        let added = flags & DNSServiceFlags(kDNSServiceFlagsAdd) != 0
+        resolver.owner?.addressResolved(
+          resolver, error, added ? address.flatMap(LanpilotDiscoveryPlugin.ipv4) : nil)
+      },
+      Unmanaged.passUnretained(resolver).toOpaque())
+    guard status == kDNSServiceErr_NoError, let ref else {
+      failed(fullname, resolver)
+      return
+    }
+    resolver.address = ref
+    guard DNSServiceSetDispatchQueue(ref, queue) == kDNSServiceErr_NoError else {
+      failed(fullname, resolver)
+      return
+    }
+  }
+
+  /// An address arrived: announce the service with it.
+  private func addressResolved(
+    _ resolver: Resolver, _ error: DNSServiceErrorType, _ address: String?
+  ) {
+    let fullname = resolver.fullname
+    guard resolvers[fullname] === resolver else { return }
+    guard error == kDNSServiceErr_NoError else {
+      failed(fullname, resolver)
+      return
+    }
+    guard let address, let result = results[fullname] else { return }
+    var txt: [String: String] = [:]
+    if case let .bonjour(record) = result.metadata { txt = record.dictionary }
     resolvers.removeValue(forKey: fullname)
-    connection.cancel()
+    resolver.cancel()
+    attempts[fullname] = 0
+    emitted.insert(fullname)
+    emit([
+      "event": "found", "fullname": fullname, "txt": txt,
+      "addrs": [address], "port": Int(resolver.port),
+    ])
+  }
+
+  private static func ipv4(_ address: UnsafePointer<sockaddr>) -> String? {
+    guard address.pointee.sa_family == sa_family_t(AF_INET) else { return nil }
+    var addr = address.withMemoryRebound(to: sockaddr_in.self, capacity: 1) {
+      $0.pointee.sin_addr
+    }
+    var buffer = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
+    guard inet_ntop(AF_INET, &addr, &buffer, socklen_t(buffer.count)) != nil else { return nil }
+    return String(cString: buffer)
+  }
+
+  /// Gives up on this attempt and retries after a delay, a bounded number of times.
+  private func failed(_ fullname: String, _ resolver: Resolver) {
+    guard resolvers[fullname] === resolver else { return }
+    resolvers.removeValue(forKey: fullname)
+    resolver.cancel()
     let count = (attempts[fullname] ?? 0) + 1
     attempts[fullname] = count
     guard count < Self.maxAttempts else { return }
@@ -185,5 +248,28 @@ public class LanpilotDiscoveryPlugin: NSObject, FlutterPlugin, FlutterStreamHand
 
   private func emit(_ event: [String: Any]) {
     DispatchQueue.main.async { [weak self] in self?.sink?(event) }
+  }
+}
+
+/// One resolution attempt: the DNSServiceRefs it owns and the port it found.
+/// Used and cancelled only on the plugin's queue, so no callback arrives after
+/// `cancel()`.
+private final class Resolver {
+  let fullname: String
+  weak var owner: LanpilotDiscoveryPlugin?
+  var service: DNSServiceRef?
+  var address: DNSServiceRef?
+  var port: UInt16 = 0
+
+  init(fullname: String, owner: LanpilotDiscoveryPlugin) {
+    self.fullname = fullname
+    self.owner = owner
+  }
+
+  func cancel() {
+    if let address { DNSServiceRefDeallocate(address) }
+    if let service { DNSServiceRefDeallocate(service) }
+    address = nil
+    service = nil
   }
 }
