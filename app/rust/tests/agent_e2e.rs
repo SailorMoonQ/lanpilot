@@ -90,7 +90,11 @@ async fn pair_with_uri_returns_the_server() {
     assert_eq!(info.short_id, h.agent.public_key().short_id());
     assert_eq!(info.public_key_hex.len(), 64);
     assert_eq!(info.addrs, vec![h.addr()]);
-    assert_eq!(info.name, h.agent.config().general.name);
+    // Display names are capped by core, and CI runners have long host names.
+    assert_eq!(
+        info.name,
+        lanpilot_core::text::sanitize_display_name(&h.agent.config().general.name)
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
