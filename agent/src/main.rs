@@ -185,12 +185,12 @@ fn run(paths: &Paths, pair: bool, mock_input: bool) -> Result<(), AgentError> {
         let mut refresh = tokio::time::interval(ADVERTISE_REFRESH);
         refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         refresh.tick().await;
-        let ctrl_c = tokio::signal::ctrl_c();
-        tokio::pin!(ctrl_c);
+        let signal = shutdown_signal()?;
+        tokio::pin!(signal);
         loop {
             tokio::select! {
-                r = &mut ctrl_c => {
-                    r?;
+                name = &mut signal => {
+                    tracing::info!("{name} received");
                     break;
                 }
                 _ = refresh.tick() => {
@@ -218,6 +218,48 @@ fn run(paths: &Paths, pair: bool, mock_input: bool) -> Result<(), AgentError> {
     })
 }
 
+/// Installs handlers for every graceful exit signal now (so none is missed)
+/// and returns a future that resolves with the name of the first to arrive.
+/// Must be called inside the runtime.
+#[cfg(unix)]
+fn shutdown_signal() -> std::io::Result<impl Future<Output = &'static str>> {
+    use tokio::signal::unix::{SignalKind, signal};
+    let mut interrupt = signal(SignalKind::interrupt())?;
+    let mut terminate = signal(SignalKind::terminate())?;
+    let mut hangup = signal(SignalKind::hangup())?;
+    Ok(async move {
+        tokio::select! {
+            _ = interrupt.recv() => "Ctrl-C",
+            _ = terminate.recv() => "SIGTERM",
+            _ = hangup.recv() => "SIGHUP",
+        }
+    })
+}
+
+/// Installs handlers for every graceful exit signal now (so none is missed)
+/// and returns a future that resolves with the name of the first to arrive.
+/// Must be called inside the runtime. For close, logoff and shutdown, tokio
+/// keeps the handler blocked so the process lives until it exits on its own
+/// or Windows kills it (about 5 s), long enough to send the mDNS goodbye.
+#[cfg(windows)]
+fn shutdown_signal() -> std::io::Result<impl Future<Output = &'static str>> {
+    use tokio::signal::windows;
+    let mut ctrl_c = windows::ctrl_c()?;
+    let mut ctrl_break = windows::ctrl_break()?;
+    let mut close = windows::ctrl_close()?;
+    let mut logoff = windows::ctrl_logoff()?;
+    let mut shutdown = windows::ctrl_shutdown()?;
+    Ok(async move {
+        tokio::select! {
+            _ = ctrl_c.recv() => "Ctrl-C",
+            _ = ctrl_break.recv() => "Ctrl-Break",
+            _ = close.recv() => "console close",
+            _ = logoff.recv() => "logoff",
+            _ = shutdown.recv() => "system shutdown",
+        }
+    })
+}
+
 /// How often the agent checks whether its LAN addresses changed.
 const ADVERTISE_REFRESH: Duration = Duration::from_secs(30);
 
@@ -241,9 +283,37 @@ fn addrs_changed(current: &[IpAddr], latest: &[IpAddr]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{Cli, Command, addrs_changed};
+    use super::{Cli, Command, addrs_changed, shutdown_signal};
     use clap::{CommandFactory, Parser};
     use std::net::IpAddr;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn shutdown_signal_registers_and_stays_pending() {
+        let signal = shutdown_signal().unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), signal)
+                .await
+                .is_err()
+        );
+    }
+
+    /// The handlers are installed before the kill, so SIGTERM cannot take
+    /// the test process down. Runs in the Ubuntu CI job.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn sigterm_resolves_shutdown_signal() {
+        let signal = shutdown_signal().unwrap();
+        let status = std::process::Command::new("kill")
+            .args(["-TERM", &std::process::id().to_string()])
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let name = tokio::time::timeout(Duration::from_secs(5), signal)
+            .await
+            .expect("SIGTERM observed within 5 s");
+        assert_eq!(name, "SIGTERM");
+    }
 
     #[test]
     fn addrs_change_is_a_set_comparison() {
