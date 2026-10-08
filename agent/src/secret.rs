@@ -85,8 +85,12 @@ mod platform {
 
     /// Copies a DPAPI output blob and frees it with LocalFree.
     fn take(out: CRYPT_INTEGER_BLOB) -> Vec<u8> {
-        // SAFETY: on success DPAPI returns a valid buffer of `cbData` bytes
-        // allocated with LocalAlloc; we copy it before freeing it once.
+        if out.pbData.is_null() {
+            return Vec::new();
+        }
+        // SAFETY: `pbData` is non-null, so DPAPI returned a valid buffer of
+        // `cbData` bytes allocated with LocalAlloc; we copy it before freeing
+        // it exactly once.
         unsafe {
             let v = std::slice::from_raw_parts(out.pbData, out.cbData as usize).to_vec();
             LocalFree(out.pbData as HLOCAL);

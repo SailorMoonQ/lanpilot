@@ -78,5 +78,11 @@ mod tests {
         assert!(p.config_file.ends_with("config.toml"));
         let parent = p.config_file.parent().unwrap();
         assert!(parent.ends_with("LanPilot") || parent.ends_with("lanpilot"));
+        let expected = if cfg!(windows) {
+            "LanPilot"
+        } else {
+            "lanpilot"
+        };
+        assert!(p.state_dir.ends_with(expected), "{:?}", p.state_dir);
     }
 }
