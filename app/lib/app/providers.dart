@@ -4,6 +4,7 @@ import '../bridge/lanpilot_client.dart';
 import '../connection/connection_manager.dart';
 import '../connection/server_store.dart';
 import '../discovery/discovery_service.dart';
+import '../pairing/pairing_controller.dart';
 import '../settings/settings_controller.dart';
 
 // Service locator: real instances come from AppServices.overrides (main.dart)
@@ -25,4 +26,11 @@ final discoveryProvider = Provider<DiscoveryService>(
 );
 final connectionProvider = Provider<ConnectionManager>(
   (ref) => _missing('connectionProvider'),
+);
+
+final pairingProvider = Provider<PairingController>(
+  (ref) => PairingController(
+    ref.watch(clientProvider),
+    ref.watch(connectionProvider),
+  ),
 );
