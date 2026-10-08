@@ -1,15 +1,4 @@
 # lanpilot_discovery
 
-A new Flutter plugin project.
-
-## Getting Started
-
-This project is a starting point for a Flutter
-[plug-in package](https://flutter.dev/to/develop-plugins),
-a specialized package that includes platform-specific implementation code for
-Android and/or iOS.
-
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
-
+Browses `_lanpilot._udp` with NWBrowser on iOS and streams raw results over the EventChannel `lanpilot/discovery`.
+Events are maps: `found` (fullname, txt, addrs, port), `lost` (fullname) and `error` (message); all are untrusted and must be validated by core.

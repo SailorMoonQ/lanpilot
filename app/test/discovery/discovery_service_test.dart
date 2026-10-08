@@ -31,6 +31,8 @@ void main() {
     )..start();
   });
 
+  tearDown(() => service.stop());
+
   test('valid results are added and lost ones removed', () {
     fakeAsync((async) {
       events.add(found(fullA));
@@ -77,6 +79,61 @@ void main() {
     fakeAsync((async) {
       events.addError(Exception('NWBrowser failed'));
       events.add(found(fullA));
+      async.flushMicrotasks();
+      expect(service.devices.value, hasLength(1));
+    });
+  });
+
+  test('a re-announcement with a new short id replaces the entry', () {
+    fakeAsync((async) {
+      events.add(found(fullA));
+      async.flushMicrotasks();
+      valid[fullA] = fakeDiscovered(shortId: 'cccccccccccccccc');
+      events.add(found(fullA));
+      async.flushMicrotasks();
+      expect(service.devices.value.keys, ['cccccccccccccccc']);
+    });
+  });
+
+  test('a re-announcement that fails validation removes the entry', () {
+    fakeAsync((async) {
+      events.add(found(fullA));
+      async.flushMicrotasks();
+      valid.remove(fullA);
+      events.add(found(fullA));
+      async.flushMicrotasks();
+      expect(service.devices.value, isEmpty);
+    });
+  });
+
+  test('lost keeps a device another fullname still announces', () {
+    fakeAsync((async) {
+      const fullB = 'bbbbbbbbbbbbbbbb._lanpilot._udp.local.';
+      valid[fullB] = fakeDiscovered(shortId: 'aaaaaaaaaaaaaaaa');
+      events.add(found(fullA));
+      events.add(found(fullB));
+      async.flushMicrotasks();
+      events.add(const RawService(found: false, fullname: fullA));
+      async.flushMicrotasks();
+      expect(service.devices.value.keys, ['aaaaaaaaaaaaaaaa']);
+    });
+  });
+
+  test('stop clears devices', () {
+    fakeAsync((async) {
+      events.add(found(fullA));
+      async.flushMicrotasks();
+      service.stop();
+      async.flushMicrotasks();
+      expect(service.devices.value, isEmpty);
+    });
+  });
+
+  test('lost for an unknown fullname is a no-op', () {
+    fakeAsync((async) {
+      events.add(found(fullA));
+      async.flushMicrotasks();
+      events.add(const RawService(found: false, fullname: 'zzz'));
       async.flushMicrotasks();
       expect(service.devices.value, hasLength(1));
     });

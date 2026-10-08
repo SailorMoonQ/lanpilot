@@ -25,21 +25,44 @@ class DiscoveryService implements DiscoveryLookup {
   }
 
   Future<void> stop() async {
-    await _sub?.cancel();
+    final sub = _sub;
     _sub = null;
+    _idByFullname.clear();
+    devices.value = const {};
+    await sub?.cancel();
   }
 
   void _onEvent(RawService raw) {
     if (raw.found) {
       final info = _validate(raw);
-      if (info == null) return;
+      if (info == null) {
+        _forget(raw.fullname);
+        return;
+      }
+      final previous = _idByFullname[raw.fullname];
       _idByFullname[raw.fullname] = info.shortId;
-      devices.value = {...devices.value, info.shortId: info};
+      final next = {...devices.value};
+      if (previous != null && previous != info.shortId) {
+        _removeIfUnclaimed(next, previous);
+      }
+      next[info.shortId] = info;
+      devices.value = next;
     } else {
-      final id = _idByFullname.remove(raw.fullname);
-      if (id == null) return;
-      devices.value = {...devices.value}..remove(id);
+      _forget(raw.fullname);
     }
+  }
+
+  /// Drops a fullname, and its device unless another fullname still claims it.
+  void _forget(String fullname) {
+    final id = _idByFullname.remove(fullname);
+    if (id == null) return;
+    final next = {...devices.value};
+    _removeIfUnclaimed(next, id);
+    devices.value = next;
+  }
+
+  void _removeIfUnclaimed(Map<String, DiscoveredInfo> map, String id) {
+    if (!_idByFullname.containsValue(id)) map.remove(id);
   }
 
   @override

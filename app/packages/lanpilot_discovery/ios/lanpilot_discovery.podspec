@@ -4,14 +4,12 @@
 #
 Pod::Spec.new do |s|
   s.name             = 'lanpilot_discovery'
-  s.version          = '0.0.1'
-  s.summary          = 'A new Flutter plugin project.'
-  s.description      = <<-DESC
-A new Flutter plugin project.
-                       DESC
-  s.homepage         = 'http://example.com'
-  s.license          = { :file => '../LICENSE' }
-  s.author           = { 'Your Company' => 'email@example.com' }
+  s.version          = '0.1.0'
+  s.summary          = 'Bonjour browsing for LanPilot with NWBrowser (iOS).'
+  s.description      = 'Bonjour browsing for LanPilot with NWBrowser (iOS).'
+  s.homepage         = 'https://github.com/SailorMoonQ/lanpilot'
+  s.license          = { :type => 'MIT OR Apache-2.0' }
+  s.author           = { 'LanPilot' => 'https://github.com/SailorMoonQ/lanpilot' }
   s.source           = { :path => '.' }
   s.source_files = 'lanpilot_discovery/Sources/lanpilot_discovery/**/*'
   s.dependency 'Flutter'
