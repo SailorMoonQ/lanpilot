@@ -124,7 +124,7 @@ impl ClientStore {
     }
 
     pub fn find(&self, selector: &str) -> Result<&KnownServer, LpctlError> {
-        let sel = selector.to_ascii_lowercase();
+        let sel = selector.to_lowercase();
         let matches: Vec<&KnownServer> = self
             .servers
             .iter()

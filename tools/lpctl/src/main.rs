@@ -38,7 +38,9 @@ enum Command {
     List,
     Move {
         server: String,
+        #[arg(allow_negative_numbers = true)]
         dx: f32,
+        #[arg(allow_negative_numbers = true)]
         dy: f32,
         #[arg(long, default_value_t = 20)]
         steps: u32,
@@ -50,6 +52,7 @@ enum Command {
     },
     Scroll {
         server: String,
+        #[arg(allow_negative_numbers = true)]
         notches: f32,
     },
     /// Press a chord, e.g. `lpctl key desk ctrl c`.
@@ -166,4 +169,17 @@ async fn real_main(cli: Cli) -> Result<(), LpctlError> {
     };
     let server = store.find(&selector)?.clone();
     perform(&mut store, &server, cli.addr, action).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn negative_numbers_parse_as_values() {
+        let cli = Cli::try_parse_from(["lpctl", "scroll", "desk", "-3"]).unwrap();
+        assert!(matches!(cli.command, Command::Scroll { notches, .. } if notches == -3.0));
+        let cli = Cli::try_parse_from(["lpctl", "move", "desk", "-50", "20"]).unwrap();
+        assert!(matches!(cli.command, Command::Move { dx, dy, .. } if dx == -50.0 && dy == 20.0));
+    }
 }

@@ -216,46 +216,50 @@ pub async fn perform(
         gesture: 0,
     };
 
-    let result = match action {
-        Action::Move { dx, dy, steps } => live.motion(&move_steps(dx, dy, steps), false).await,
-        Action::Square => {
-            for (dx, dy) in [(200.0, 0.0), (0.0, 200.0), (-200.0, 0.0), (0.0, -200.0)] {
-                live.motion(&move_steps(dx, dy, 30), false).await?;
+    // Errors inside this block must not skip the close below.
+    let result = async {
+        match action {
+            Action::Move { dx, dy, steps } => live.motion(&move_steps(dx, dy, steps), false).await,
+            Action::Square => {
+                for (dx, dy) in [(200.0, 0.0), (0.0, 200.0), (-200.0, 0.0), (0.0, -200.0)] {
+                    live.motion(&move_steps(dx, dy, 30), false).await?;
+                }
+                Ok(())
             }
-            Ok(())
-        }
-        Action::Scroll(notches) => live.motion(&move_steps(0.0, notches, 10), true).await,
-        Action::Click(button) => {
-            for down in [true, false] {
-                live.request(client_message::Body::PointerButton(PointerButton {
-                    button: button as i32,
-                    down,
-                    gesture: None,
+            Action::Scroll(notches) => live.motion(&move_steps(0.0, notches, 10), true).await,
+            Action::Click(button) => {
+                for down in [true, false] {
+                    live.request(client_message::Body::PointerButton(PointerButton {
+                        button: button as i32,
+                        down,
+                        gesture: None,
+                    }))
+                    .await?;
+                }
+                Ok(())
+            }
+            Action::Keys(usages) => {
+                live.request(client_message::Body::KeyChord(KeyChord { usages }))
+                    .await
+            }
+            Action::Media(action) => {
+                live.request(client_message::Body::Media(Media {
+                    action: action as i32,
                 }))
-                .await?;
+                .await
             }
-            Ok(())
+            Action::Text(text) => {
+                live.request(client_message::Body::Text(Text { text }))
+                    .await
+            }
+            Action::Unpair => {
+                live.request(client_message::Body::Unpair(Unpair {}))
+                    .await?;
+                store.remove(&server.public_key)
+            }
         }
-        Action::Keys(usages) => {
-            live.request(client_message::Body::KeyChord(KeyChord { usages }))
-                .await
-        }
-        Action::Media(action) => {
-            live.request(client_message::Body::Media(Media {
-                action: action as i32,
-            }))
-            .await
-        }
-        Action::Text(text) => {
-            live.request(client_message::Body::Text(Text { text }))
-                .await
-        }
-        Action::Unpair => {
-            live.request(client_message::Body::Unpair(Unpair {}))
-                .await?;
-            store.remove(&server.public_key)
-        }
-    };
+    }
+    .await;
     // Let the last datagrams leave before closing.
     tokio::time::sleep(Duration::from_millis(50)).await;
     conn.close(0u32.into(), b"done");

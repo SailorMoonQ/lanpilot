@@ -61,9 +61,28 @@ async fn pair_and_drive_the_agent() {
         })
         .sum();
     assert_eq!(moved, 30);
-    assert!(e.contains(&Recorded::Key(HidUsage(0x06), true)));
-    assert!(e.contains(&Recorded::Button(InMouse::Left, true)));
-    assert!(e.contains(&Recorded::Button(InMouse::Left, false)));
+    let keys: Vec<&Recorded> = e
+        .iter()
+        .filter(|r| matches!(r, Recorded::Key(..)))
+        .collect();
+    assert_eq!(
+        keys,
+        vec![
+            &Recorded::Key(HidUsage(0xE0), true),
+            &Recorded::Key(HidUsage(0x06), true),
+            &Recorded::Key(HidUsage(0x06), false),
+            &Recorded::Key(HidUsage(0xE0), false),
+        ]
+    );
+    let down = e
+        .iter()
+        .position(|r| *r == Recorded::Button(InMouse::Left, true))
+        .expect("button down");
+    let up = e
+        .iter()
+        .position(|r| *r == Recorded::Button(InMouse::Left, false))
+        .expect("button up");
+    assert!(down < up);
 
     perform(&mut store, &server, None, Action::Unpair)
         .await
