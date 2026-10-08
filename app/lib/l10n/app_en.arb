@@ -39,7 +39,7 @@
   "pairWithPassword": "Pair with password",
   "errInvalidCode": "This is not a LanPilot pairing link.",
   "errUnreachable": "Cannot reach the computer. Make sure both are on the same network.",
-  "errWrongComputer": "A different computer answered.",
+  "errWrongComputer": "A different computer answered than the one you are pairing with.",
   "errCodeExpired": "The pairing code expired. Refresh it on the computer and try again.",
   "errWrongPassword": "Wrong password.",
   "errLocked": "Too many attempts. Try again in {seconds} s.",

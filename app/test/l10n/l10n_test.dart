@@ -23,4 +23,22 @@ void main() {
       );
     }
   });
+  test('every zh placeholder exists in the en string', () {
+    Set<String> placeholders(Object? value) =>
+        RegExp(r'\{(\w+)\}')
+            .allMatches(value! as String)
+            .map((m) => m.group(1)!)
+            .toSet();
+    final en = arb('app_en.arb');
+    final zh = arb('app_zh.arb');
+    for (final key in zh.keys.where(
+      (k) => !k.startsWith('@') && en.containsKey(k),
+    )) {
+      expect(
+        placeholders(zh[key]).difference(placeholders(en[key])),
+        isEmpty,
+        reason: key,
+      );
+    }
+  });
 }

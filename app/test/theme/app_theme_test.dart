@@ -69,4 +69,14 @@ void main() {
     );
     expect(palette.frosted, isTrue);
   });
+  test('dark and native onPrimary contrast the accent', () {
+    expect(
+      buildTheme(ThemeChoice.dark, Brightness.dark).colorScheme.onPrimary,
+      const Color(0xFF000000),
+    );
+    expect(
+      buildTheme(ThemeChoice.native, Brightness.light).colorScheme.onPrimary,
+      const Color(0xFFFFFFFF),
+    );
+  });
 }

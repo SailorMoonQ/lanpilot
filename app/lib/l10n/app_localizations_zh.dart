@@ -81,7 +81,7 @@ class AppLocalizationsZh extends AppLocalizations {
   String get settings => '设置';
 
   @override
-  String get addComputerHint => '在电脑上运行 LanPilot，扫描它显示的二维码，或粘贴配对链接。';
+  String get addComputerHint => '在电脑上运行 LanPilot，扫描它显示的二维码，或粘贴配对链接';
 
   @override
   String get scanQr => '扫描二维码';
@@ -126,7 +126,7 @@ class AppLocalizationsZh extends AppLocalizations {
   String get errUnreachable => '连不上这台电脑，请确认手机和电脑在同一网络';
 
   @override
-  String get errWrongComputer => '应答的不是二维码里的电脑';
+  String get errWrongComputer => '应答的不是要配对的那台电脑';
 
   @override
   String get errCodeExpired => '配对码已失效，请在电脑上刷新后重试';
@@ -166,10 +166,10 @@ class AppLocalizationsZh extends AppLocalizations {
   String get mediaPrevious => '上一首';
 
   @override
-  String get mediaVolumeUp => '音量加';
+  String get mediaVolumeUp => '调高音量';
 
   @override
-  String get mediaVolumeDown => '音量减';
+  String get mediaVolumeDown => '调低音量';
 
   @override
   String get mediaMute => '静音';

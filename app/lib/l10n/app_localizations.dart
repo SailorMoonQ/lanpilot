@@ -329,7 +329,7 @@ abstract class AppLocalizations {
   /// No description provided for @errWrongComputer.
   ///
   /// In en, this message translates to:
-  /// **'A different computer answered.'**
+  /// **'A different computer answered than the one you are pairing with.'**
   String get errWrongComputer;
 
   /// No description provided for @errCodeExpired.

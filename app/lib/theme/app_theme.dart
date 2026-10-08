@@ -86,6 +86,9 @@ class LanPilotPalette extends ThemeExtension<LanPilotPalette> {
 
 const _white = Color(0xFFFFFFFF);
 
+/// Opaque surface behind sheets and canvas in the brand theme.
+const _brandSheet = Color(0xFF6A50FF);
+
 const _nativeLight = LanPilotPalette(
   background: Color(0xFFF2F2F7),
   touchpadFill: _white,
@@ -162,9 +165,11 @@ ThemeData buildTheme(ThemeChoice choice, Brightness system) {
         brightness: brightness,
       ).copyWith(
         primary: p.accent,
-        onPrimary: choice == ThemeChoice.brand
-            ? const Color(0xFF5B4BFF)
-            : _white,
+        onPrimary: switch (choice) {
+          ThemeChoice.native => _white,
+          ThemeChoice.dark => const Color(0xFF000000),
+          ThemeChoice.brand => const Color(0xFF5B4BFF),
+        },
         surface: p.controlFill,
         onSurface: p.text,
       );
@@ -173,9 +178,7 @@ ThemeData buildTheme(ThemeChoice choice, Brightness system) {
     scaffoldBackgroundColor: p.backgroundGradient == null
         ? p.background
         : Colors.transparent,
-    canvasColor: p.backgroundGradient == null
-        ? p.background
-        : const Color(0xFF6A50FF),
+    canvasColor: p.backgroundGradient == null ? p.background : _brandSheet,
     textTheme: base.textTheme.apply(bodyColor: p.text, displayColor: p.text),
     iconTheme: IconThemeData(color: p.text),
     appBarTheme: AppBarTheme(
@@ -201,7 +204,7 @@ ThemeData buildTheme(ThemeChoice choice, Brightness system) {
     bottomSheetTheme: BottomSheetThemeData(
       backgroundColor: p.backgroundGradient == null
           ? p.controlFill
-          : const Color(0xFF6A50FF),
+          : _brandSheet,
     ),
     listTileTheme: ListTileThemeData(textColor: p.text, iconColor: p.text),
     extensions: [p],

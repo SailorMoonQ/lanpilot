@@ -129,7 +129,8 @@ class AppLocalizationsEn extends AppLocalizations {
       'Cannot reach the computer. Make sure both are on the same network.';
 
   @override
-  String get errWrongComputer => 'A different computer answered.';
+  String get errWrongComputer =>
+      'A different computer answered than the one you are pairing with.';
 
   @override
   String get errCodeExpired =>
