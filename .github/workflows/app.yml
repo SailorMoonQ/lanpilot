@@ -1,0 +1,58 @@
+name: app
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - "app/**"
+      - "core/**"
+      - "agent/**"
+      - "input/**"
+      - ".github/workflows/app.yml"
+
+jobs:
+  ios-app:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          targets: aarch64-apple-ios, aarch64-apple-ios-sim
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: app/rust
+          cache-bin: true
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: 3.47.5
+          channel: stable
+          cache: true
+      - name: Install flutter_rust_bridge_codegen
+        run: cargo install flutter_rust_bridge_codegen --version 2.13.0 --locked
+      - name: Bridge crate
+        working-directory: app/rust
+        run: |
+          cargo fmt --check
+          cargo clippy --all-targets --locked -- -D warnings
+          cargo test --locked
+      - name: Generated code is up to date
+        working-directory: app
+        run: |
+          flutter pub get
+          flutter_rust_bridge_codegen generate
+          (cd rust && cargo fmt)
+          dart format lib
+          flutter gen-l10n
+          git diff --exit-code
+      - name: Dart
+        working-directory: app
+        run: |
+          dart format --output=none --set-exit-if-changed lib test integration_test packages/lanpilot_discovery/lib packages/lanpilot_discovery/test
+          flutter analyze
+          flutter test
+          (cd packages/lanpilot_discovery && flutter test)
+      - name: Build for iOS (no signing)
+        working-directory: app
+        run: flutter build ios --no-codesign
