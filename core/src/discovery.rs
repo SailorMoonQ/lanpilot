@@ -181,20 +181,22 @@ impl Advertiser {
     /// [`Advertisement::txt`]); see [`Advertisement::addrs`] for interface
     /// selection. Loopback stays disabled (the mdns-sd default).
     pub fn start(ad: &Advertisement) -> Result<Self, DiscoveryError> {
-        let info = service_info(ad)?;
-        let daemon = ServiceDaemon::new()?;
-        if !ad.addrs.is_empty() {
-            daemon.disable_interface(IfKind::All)?;
-            for ip in &ad.addrs {
-                daemon.enable_interface(IfKind::Addr(*ip))?;
+        Self::start_on(ServiceDaemon::new()?, ad)
+    }
+
+    /// [`Self::start`] on an existing daemon, which is shut down on error so
+    /// its thread does not leak.
+    fn start_on(daemon: ServiceDaemon, ad: &Advertisement) -> Result<Self, DiscoveryError> {
+        match register(&daemon, ad) {
+            Ok(fullname) => Ok(Self {
+                daemon,
+                fullname: Some(fullname),
+            }),
+            Err(e) => {
+                let _ = daemon.shutdown();
+                Err(e)
             }
         }
-        let fullname = info.get_fullname().to_owned();
-        daemon.register(info)?;
-        Ok(Self {
-            daemon,
-            fullname: Some(fullname),
-        })
     }
 
     /// Withdraws the record and stops the daemon, waiting (up to
@@ -210,6 +212,20 @@ impl Advertiser {
         }
         let _ = self.daemon.shutdown();
     }
+}
+
+/// Selects the interfaces for `ad` and registers it; returns the fullname.
+fn register(daemon: &ServiceDaemon, ad: &Advertisement) -> Result<String, DiscoveryError> {
+    let info = service_info(ad)?;
+    if !ad.addrs.is_empty() {
+        daemon.disable_interface(IfKind::All)?;
+        for ip in &ad.addrs {
+            daemon.enable_interface(IfKind::Addr(*ip))?;
+        }
+    }
+    let fullname = info.get_fullname().to_owned();
+    daemon.register(info)?;
+    Ok(fullname)
 }
 
 /// How long [`Advertiser::stop`] waits for the daemon to send the goodbye.
@@ -326,6 +342,33 @@ mod tests {
             "0123456789abcdef._lanpilot._udp.local."
         );
         assert_eq!(info.get_port(), 45810);
+    }
+
+    #[test]
+    fn failed_start_shuts_the_daemon_down() {
+        let daemon = ServiceDaemon::new().unwrap();
+        let mut bad = ad();
+        // "<id>.local." over 255 bytes: register() rejects the hostname.
+        bad.short_id = "a".repeat(250);
+        bad.addrs = vec!["192.168.50.203".parse().unwrap()];
+        assert!(Advertiser::start_on(daemon.clone(), &bad).is_err());
+        // A status query racing the exit is dropped unanswered; once the
+        // daemon thread is gone, status() answers Shutdown directly.
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            let status = daemon
+                .status()
+                .unwrap()
+                .recv_timeout(Duration::from_millis(100));
+            if matches!(status, Ok(mdns_sd::DaemonStatus::Shutdown)) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "daemon still running: {status:?}"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 
     #[test]
