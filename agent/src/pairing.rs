@@ -8,7 +8,7 @@ use lanpilot_core::pairing::invite::Invite;
 use lanpilot_core::pairing::password::{LOCKOUT, PasswordAttempts, Reserved};
 use lanpilot_core::pairing::tokens::TokenStore;
 use lanpilot_core::proto::v1::Os;
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -25,19 +25,74 @@ pub fn current_os() -> Os {
     }
 }
 
-/// IPv4 only: the core client binds IPv4 (see `transport::client_endpoint`).
-pub fn lan_ipv4_addrs() -> Vec<IpAddr> {
-    let mut addrs: Vec<IpAddr> = if_addrs::get_if_addrs()
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|iface| match iface.ip() {
-            IpAddr::V4(v4) if !v4.is_loopback() && !v4.is_link_local() => Some(IpAddr::V4(v4)),
-            _ => None,
-        })
+const VIRTUAL_NAME_WORDS: &[&str] = &[
+    "mihomo",
+    "clash",
+    "wintun",
+    "tun",
+    "tap",
+    "wireguard",
+    "tailscale",
+    "zerotier",
+    "vpn",
+    "vethernet",
+    "hyper-v",
+    "docker",
+    "vmware",
+    "virtualbox",
+    "vbox",
+    "utun",
+    "wsl",
+];
+
+/// VPN, proxy and virtual adapters, recognized by address range or adapter name.
+/// Their addresses are not reachable from the phone's LAN.
+pub fn is_virtual_adapter(name: &str, ip: Ipv4Addr) -> bool {
+    let [a, b, ..] = ip.octets();
+    if a == 198 && (b == 18 || b == 19) {
+        return true;
+    }
+    let name = name.to_lowercase();
+    let wireguard = name == "wg"
+        || name
+            .strip_prefix("wg")
+            .is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_digit()));
+    wireguard || VIRTUAL_NAME_WORDS.iter().any(|w| name.contains(w))
+}
+
+/// Picks the IPv4 addresses to advertise in a pairing invite. Falls back to every
+/// non-loopback, non-link-local address when filtering would leave nothing.
+pub fn select_invite_addrs(ifaces: &[(String, Ipv4Addr)]) -> Vec<IpAddr> {
+    let usable: Vec<&(String, Ipv4Addr)> = ifaces
+        .iter()
+        .filter(|(_, ip)| !ip.is_loopback() && !ip.is_link_local())
         .collect();
+    let preferred: Vec<IpAddr> = usable
+        .iter()
+        .filter(|(name, ip)| !is_virtual_adapter(name, *ip))
+        .map(|(_, ip)| IpAddr::V4(*ip))
+        .collect();
+    let mut addrs = if preferred.is_empty() {
+        usable.iter().map(|(_, ip)| IpAddr::V4(*ip)).collect()
+    } else {
+        preferred
+    };
     addrs.sort();
     addrs.dedup();
     addrs
+}
+
+/// IPv4 only: the core client binds IPv4 (see `transport::client_endpoint`).
+pub fn lan_ipv4_addrs() -> Vec<IpAddr> {
+    let ifaces: Vec<(String, Ipv4Addr)> = if_addrs::get_if_addrs()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|iface| match iface.ip() {
+            IpAddr::V4(v4) => Some((iface.name, v4)),
+            IpAddr::V6(_) => None,
+        })
+        .collect();
+    select_invite_addrs(&ifaces)
 }
 
 pub fn render_qr(text: &str) -> String {
@@ -247,5 +302,42 @@ mod tests {
             };
             assert!(!v4.is_loopback() && !v4.is_link_local(), "{v4}");
         }
+    }
+
+    #[test]
+    fn virtual_adapters_are_recognized() {
+        let ip = |s: &str| s.parse::<Ipv4Addr>().unwrap();
+        assert!(is_virtual_adapter("Mihomo", ip("198.18.0.1")));
+        assert!(
+            is_virtual_adapter("Ethernet", ip("198.19.255.1")),
+            "198.18.0.0/15 by address"
+        );
+        assert!(is_virtual_adapter("vEthernet (WSL)", ip("172.20.0.1")));
+        assert!(is_virtual_adapter("wg0", ip("10.8.0.2")));
+        assert!(is_virtual_adapter("Tailscale", ip("100.64.0.3")));
+        assert!(!is_virtual_adapter("Ethernet", ip("192.168.50.203")));
+        assert!(!is_virtual_adapter("Wi-Fi 6", ip("192.168.1.10")));
+        assert!(!is_virtual_adapter("wlan0", ip("192.168.1.11")));
+        assert!(!is_virtual_adapter("eno1", ip("10.0.0.5")));
+    }
+
+    #[test]
+    fn invite_addrs_drop_virtual_adapters_but_never_end_empty() {
+        let ip = |s: &str| s.parse::<Ipv4Addr>().unwrap();
+        let ifaces = vec![
+            ("Ethernet".to_owned(), ip("192.168.50.203")),
+            ("Mihomo".to_owned(), ip("198.18.0.1")),
+            ("Loopback".to_owned(), ip("127.0.0.1")),
+            ("Ethernet 2".to_owned(), ip("169.254.10.1")),
+        ];
+        assert_eq!(
+            select_invite_addrs(&ifaces),
+            vec![IpAddr::V4(ip("192.168.50.203"))]
+        );
+        let only_virtual = vec![("Mihomo".to_owned(), ip("198.18.0.1"))];
+        assert_eq!(
+            select_invite_addrs(&only_virtual),
+            vec![IpAddr::V4(ip("198.18.0.1"))]
+        );
     }
 }

@@ -75,9 +75,9 @@ impl Agent {
 
     pub fn capabilities(&self) -> Vec<&'static str> {
         if self.supports_text {
-            vec!["text"]
+            vec!["text", "zoom"]
         } else {
-            vec![]
+            vec!["zoom"]
         }
     }
 

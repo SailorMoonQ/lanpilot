@@ -7,7 +7,7 @@ use lanpilot_core::pairing::flow::{PairedServer, pair_with_invite, pair_with_pas
 use lanpilot_core::pairing::invite::Invite;
 use lanpilot_core::proto::v1::{
     ClientMessage, GestureState, KeyChord, Media, MediaAction, MouseButton, Os, PointerButton,
-    PointerDatagram, ServerMessage, Text, Unpair, client_message, server_message,
+    PointerDatagram, ServerMessage, Text, Unpair, Zoom, client_message, server_message,
 };
 use lanpilot_core::quinn;
 use lanpilot_core::session::{ClientSession, connect_paired, local_hello, open_session};
@@ -35,6 +35,7 @@ pub enum Action {
     Move { dx: f32, dy: f32, steps: u32 },
     Click(MouseButton),
     Scroll(f32),
+    Zoom(f32),
     Keys(Vec<u32>),
     Media(MediaAction),
     Text(String),
@@ -234,6 +235,10 @@ pub async fn perform(
                 Ok(())
             }
             Action::Scroll(notches) => live.motion(&move_steps(0.0, notches, 10), true).await,
+            Action::Zoom(steps) => {
+                live.request(client_message::Body::Zoom(Zoom { steps }))
+                    .await
+            }
             Action::Click(button) => {
                 for down in [true, false] {
                     live.request(client_message::Body::PointerButton(PointerButton {

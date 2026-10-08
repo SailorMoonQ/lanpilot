@@ -122,7 +122,10 @@ async fn pair_then_control_the_pointer_and_keys() {
     assert!(h.agent.store().contains(&c.id.public_key()));
 
     let (conn, mut s) = session(&h, &c).await;
-    assert_eq!(s.server_hello.capabilities, vec!["text".to_owned()]);
+    assert_eq!(
+        s.server_hello.capabilities,
+        vec!["text".to_owned(), "zoom".to_owned()]
+    );
 
     conn.send_datagram(
         PointerDatagram {
@@ -182,6 +185,8 @@ async fn pair_then_control_the_pointer_and_keys() {
     assert!(
         matches!(cmd.body, Some(server_message::Body::Error(e)) if e.code == ErrorCode::Unsupported as i32)
     );
+    let zoom = request(&mut s, 6, client_message::Body::Zoom(Zoom { steps: 1.0 })).await;
+    assert!(matches!(zoom.body, Some(server_message::Body::Ack(_))));
 
     let events = h.events.events();
     let tail: Vec<_> = events
@@ -200,6 +205,9 @@ async fn pair_then_control_the_pointer_and_keys() {
             Recorded::Key(HidUsage(0x06), false),
             Recorded::Key(HidUsage(0xE0), false),
             Recorded::Text("你好".into()),
+            Recorded::Key(HidUsage(0xE0), true),
+            Recorded::Scroll(0.0, 1.0),
+            Recorded::Key(HidUsage(0xE0), false),
         ]
     );
 }
@@ -326,5 +334,5 @@ async fn no_text_capability_without_text_support() {
     let h = start(false).await;
     let c = pair(&h).await;
     let (_conn, s) = session(&h, &c).await;
-    assert!(s.server_hello.capabilities.is_empty());
+    assert_eq!(s.server_hello.capabilities, vec!["zoom".to_owned()]);
 }
