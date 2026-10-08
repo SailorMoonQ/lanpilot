@@ -13,7 +13,7 @@ LOG="$WORK/agent.log"
 
 # SIGINT (not SIGTERM) so the agent withdraws its mDNS record; stale records
 # would pile up on this Mac and in every browser on the network.
-cleanup() {
+stop_agent() {
   if [[ -z "${AGENT_PID:-}" ]]; then return; fi
   kill -INT "$AGENT_PID" 2>/dev/null || true
   for _ in $(seq 1 50); do
@@ -23,6 +23,12 @@ cleanup() {
   kill -KILL "$AGENT_PID" 2>/dev/null || true
   wait "$AGENT_PID" 2>/dev/null || true
   AGENT_PID=
+}
+
+cleanup() {
+  local status=$?
+  stop_agent
+  if [[ "$status" -ne 0 ]]; then echo "Agent log: $LOG" >&2; fi
 }
 trap cleanup EXIT
 
@@ -37,6 +43,11 @@ fi
 
 (cd "$REPO_DIR" && cargo build -q -p lanpilot-agent)
 
+# Build the app before starting the agent: a cold build can take minutes, longer
+# than the pairing token lives (120 s). The test run below then rebuilds
+# incrementally.
+(cd "$APP_DIR" && flutter build ios --simulator --debug -t integration_test/e2e_test.dart)
+
 RUST_LOG=info,lanpilot_input=debug \
   "$REPO_DIR/target/debug/lanpilot-agent" --home "$WORK/home" run --pair --mock-input \
   >"$LOG" 2>&1 &
@@ -44,12 +55,22 @@ AGENT_PID=$!
 
 for _ in $(seq 1 150); do
   grep -q 'lanpilot://pair?d=' "$LOG" && break
+  if ! kill -0 "$AGENT_PID" 2>/dev/null; then
+    echo "The agent exited before printing a pairing link:" >&2
+    cat "$LOG" >&2
+    exit 1
+  fi
   sleep 0.2
 done
 URI="$(grep -Eo 'lanpilot://pair\?d=[A-Za-z0-9_-]+' "$LOG" | head -1 || true)"
 ID="$(sed -n 's/.*(\([0-9a-f]\{16\}\)) listening on UDP.*/\1/p' "$LOG" | head -1)"
 if [[ -z "$URI" ]]; then
   echo "The agent printed no pairing link:" >&2
+  cat "$LOG" >&2
+  exit 1
+fi
+if [[ -z "$ID" ]]; then
+  echo "The agent printed no id, so the nearby check cannot run:" >&2
   cat "$LOG" >&2
   exit 1
 fi

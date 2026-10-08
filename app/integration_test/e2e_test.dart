@@ -41,15 +41,14 @@ void main() {
     await app.main();
     await pumpUntil(tester, find.byKey(const Key('paste-field')));
 
-    // NWBrowser found the agent and core validated it.
-    if (agentId.isNotEmpty) {
-      // The app resolves a service for at most three tries of five seconds.
-      await pumpUntil(
-        tester,
-        find.byKey(Key('nearby-$agentId')),
-        timeout: const Duration(seconds: 30),
-      );
-    }
+    // NWBrowser found the agent and core validated it. The app gives a
+    // service three resolve attempts of 5 s with 2 s between them (19 s).
+    expect(agentId, isNotEmpty, reason: 'run this through tool/sim_e2e.sh');
+    await pumpUntil(
+      tester,
+      find.byKey(Key('nearby-$agentId')),
+      timeout: const Duration(seconds: 30),
+    );
 
     await tester.enterText(find.byKey(const Key('paste-field')), pairUri);
     await tester.tap(find.byKey(const Key('paste-pair')));
