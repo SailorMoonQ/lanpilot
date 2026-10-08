@@ -11,6 +11,7 @@ use crate::text::sanitize_display_name;
 use mdns_sd::{IfKind, ServiceDaemon, ServiceEvent, ServiceInfo};
 use std::collections::HashMap;
 use std::net::IpAddr;
+use std::time::Duration;
 
 pub const SERVICE_TYPE: &str = "_lanpilot._udp.local.";
 
@@ -171,7 +172,8 @@ impl DiscoveredDevice {
 
 pub struct Advertiser {
     daemon: ServiceDaemon,
-    fullname: String,
+    /// `None` once withdrawn, so `Drop` never unregisters twice.
+    fullname: Option<String>,
 }
 
 impl Advertiser {
@@ -189,9 +191,29 @@ impl Advertiser {
         }
         let fullname = info.get_fullname().to_owned();
         daemon.register(info)?;
-        Ok(Self { daemon, fullname })
+        Ok(Self {
+            daemon,
+            fullname: Some(fullname),
+        })
+    }
+
+    /// Withdraws the record and stops the daemon, waiting (up to
+    /// [`GOODBYE_TIMEOUT`]) until the goodbye has been sent so browsers see
+    /// the device go away promptly. Prefer this over dropping, which cannot
+    /// wait.
+    pub async fn stop(mut self) {
+        let Some(fullname) = self.fullname.take() else {
+            return;
+        };
+        if let Ok(status) = self.daemon.unregister(&fullname) {
+            let _ = tokio::time::timeout(GOODBYE_TIMEOUT, status.recv_async()).await;
+        }
+        let _ = self.daemon.shutdown();
     }
 }
+
+/// How long [`Advertiser::stop`] waits for the daemon to send the goodbye.
+pub const GOODBYE_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// The service record for `ad`: exactly `ad.addrs` when non-empty, otherwise
 /// no addresses and mdns-sd's automatic address tracking.
@@ -212,10 +234,14 @@ fn service_info(ad: &Advertisement) -> Result<ServiceInfo, DiscoveryError> {
     })
 }
 
+/// Best effort for panics and early returns: the goodbye is queued but not
+/// awaited. Does nothing after [`Advertiser::stop`].
 impl Drop for Advertiser {
     fn drop(&mut self) {
-        let _ = self.daemon.unregister(&self.fullname);
-        let _ = self.daemon.shutdown();
+        if let Some(fullname) = self.fullname.take() {
+            let _ = self.daemon.unregister(&fullname);
+            let _ = self.daemon.shutdown();
+        }
     }
 }
 
