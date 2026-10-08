@@ -200,19 +200,30 @@ impl Advertiser {
     }
 
     /// Withdraws the record and stops the daemon, waiting (up to
-    /// [`GOODBYE_TIMEOUT`]) until the goodbye has been sent so browsers see
-    /// the device go away promptly. Prefer this over dropping, which cannot
-    /// wait.
+    /// [`GOODBYE_TIMEOUT`]) until the goodbye has been sent, plus a short
+    /// pause for mdns-sd's repeated copy, so browsers see the device go away
+    /// promptly. Prefer this over dropping, which cannot wait.
     pub async fn stop(mut self) {
+        self.withdraw().await;
+        let _ = self.daemon.shutdown();
+    }
+
+    /// Unregisters (once) and waits for both goodbye copies.
+    async fn withdraw(&mut self) {
         let Some(fullname) = self.fullname.take() else {
             return;
         };
-        if let Ok(status) = self.daemon.unregister(&fullname) {
-            let _ = tokio::time::timeout(GOODBYE_TIMEOUT, status.recv_async()).await;
+        if let Ok(status) = self.daemon.unregister(&fullname)
+            && let Ok(Ok(_)) = tokio::time::timeout(GOODBYE_TIMEOUT, status.recv_async()).await
+        {
+            tokio::time::sleep(GOODBYE_RESEND_WAIT).await;
         }
-        let _ = self.daemon.shutdown();
     }
 }
+
+/// How long [`Advertiser::stop`] waits, after the first goodbye, for
+/// mdns-sd's second copy (sent 120 ms after the first).
+const GOODBYE_RESEND_WAIT: Duration = Duration::from_millis(150);
 
 /// Selects the interfaces for `ad` and registers it; returns the fullname.
 fn register(daemon: &ServiceDaemon, ad: &Advertisement) -> Result<String, DiscoveryError> {
@@ -369,6 +380,43 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(20));
         }
+    }
+
+    /// mdns-sd queues a second goodbye copy 120 ms after the first;
+    /// shutting the daemon down sooner drops it.
+    #[tokio::test]
+    #[ignore = "needs working local multicast; run with --ignored"]
+    async fn withdraw_lets_the_second_goodbye_go_out() {
+        let mut a = ad();
+        a.short_id = "c0ffee00c0ffee00".into();
+        a.port = 45997;
+        let mut browser = Browser::start().unwrap();
+        let mut advertiser = Advertiser::start(&a).unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if let Some(DiscoveryEvent::Found(d)) = browser.next().await
+                    && d.short_id == a.short_id
+                {
+                    return;
+                }
+            }
+        })
+        .await
+        .expect("announced within 10 s");
+
+        advertiser.withdraw().await;
+        let metrics = advertiser
+            .daemon
+            .get_metrics()
+            .unwrap()
+            .recv_async()
+            .await
+            .unwrap();
+        advertiser.stop().await;
+        assert!(
+            metrics.get("unregister-resend").copied().unwrap_or(0) >= 1,
+            "{metrics:?}"
+        );
     }
 
     #[test]
