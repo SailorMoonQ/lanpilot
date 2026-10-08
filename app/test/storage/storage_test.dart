@@ -30,6 +30,20 @@ void main() {
       expect(await JsonFile(File('${dir.path}/none.json')).read(), isEmpty);
     });
 
+    test('overlapping writes are applied in order', () async {
+      final file = JsonFile(File('${dir.path}/c.json'));
+      final first = file.write({'n': 1});
+      final second = file.write({'n': 2});
+      await Future.wait([first, second]);
+      expect(await file.read(), {'n': 2});
+    });
+
+    test('invalid utf-8 reads as empty', () async {
+      final f = File('${dir.path}/u.json')
+        ..writeAsBytesSync([0xff, 0xfe, 0x7b]);
+      expect(await JsonFile(f).read(), isEmpty);
+    });
+
     test('corrupt json reads as empty', () async {
       final f = File('${dir.path}/bad.json')..writeAsStringSync('{not json');
       expect(await JsonFile(f).read(), isEmpty);
