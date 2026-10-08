@@ -21,6 +21,21 @@ impl WheelAccumulator {
     }
 }
 
+/// Turns hi-res units into legacy whole notches (one notch per 120 units).
+#[derive(Debug, Default)]
+pub struct NotchCounter {
+    rem: i32,
+}
+
+impl NotchCounter {
+    pub fn feed(&mut self, units: i32) -> i32 {
+        self.rem += units;
+        let notches = self.rem / UNITS_PER_NOTCH as i32;
+        self.rem -= notches * UNITS_PER_NOTCH as i32;
+        notches
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -48,5 +63,15 @@ mod tests {
         let mut w = WheelAccumulator::default();
         assert_eq!(w.take(0.0, -0.004), (0, 0));
         assert_eq!(w.take(0.0, -0.005), (0, -1));
+    }
+
+    #[test]
+    fn notch_counter_emits_whole_notches() {
+        let mut n = NotchCounter::default();
+        assert_eq!(n.feed(60), 0);
+        assert_eq!(n.feed(60), 1);
+        assert_eq!(n.feed(-240), -2);
+        assert_eq!(n.feed(-119), 0);
+        assert_eq!(n.feed(-1), -1);
     }
 }

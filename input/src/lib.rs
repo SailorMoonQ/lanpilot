@@ -6,6 +6,8 @@
 //!   positive `dx` is wheel right.
 
 mod keys;
+#[cfg(target_os = "linux")]
+pub mod linux;
 pub mod recording;
 pub mod wheel;
 #[cfg(windows)]
@@ -57,7 +59,11 @@ pub fn open_default() -> Result<Box<dyn InputBackend>, InputError> {
     {
         Ok(Box::new(windows::SendInputBackend::new()))
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        Ok(Box::new(linux::UinputBackend::new()?))
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         Err(InputError::Unsupported(
             "no input backend for this platform",

@@ -1,0 +1,4 @@
+# LanPilot: let the user logged in at the seat create virtual input devices.
+# Install: sudo cp 70-lanpilot-uinput.rules /etc/udev/rules.d/ &&
+#          sudo udevadm control --reload && sudo udevadm trigger /dev/uinput
+KERNEL=="uinput", SUBSYSTEM=="misc", TAG+="uaccess", OPTIONS+="static_node=uinput"
