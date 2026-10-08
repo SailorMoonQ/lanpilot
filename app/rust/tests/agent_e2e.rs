@@ -7,11 +7,14 @@ use lanpilot_agent::secret::store_password;
 use lanpilot_agent::server::Agent;
 use lanpilot_core::identity::Identity;
 use lanpilot_input::recording::{Recorded, RecordingBackend, RecordingHandle};
+use lanpilot_input::{HidUsage, MediaKey, MouseButton as InMouse};
+use rust_lib_lanpilot::api::types::{CloseReason, ConnectionEvent, MediaKind, MouseButtonKind};
 use rust_lib_lanpilot::api::types::{ErrorKind, PairedServerInfo};
 use rust_lib_lanpilot::client::Client;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::sync::mpsc;
 
 const PASSWORD: &str = "hunter22";
 
@@ -19,7 +22,6 @@ struct Harness {
     _dir: tempfile::TempDir,
     agent: Arc<Agent>,
     addr: SocketAddr,
-    #[allow(dead_code)]
     events: RecordingHandle,
 }
 
@@ -55,7 +57,6 @@ impl Harness {
     }
 
     /// Polls the recorded input until `done` holds, failing after 5 s.
-    #[allow(dead_code)]
     async fn wait_for(&self, what: &str, done: impl Fn(&[Recorded]) -> bool) {
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
@@ -135,4 +136,294 @@ async fn password_pairing() {
         .unwrap();
     assert_eq!(info.short_id, h.agent.public_key().short_id());
     assert_eq!(info.addrs, vec![h.addr()]);
+}
+
+fn sink(client: &Client) -> mpsc::UnboundedReceiver<ConnectionEvent> {
+    let (tx, rx) = mpsc::unbounded_channel();
+    client.set_event_sink(Arc::new(move |e| {
+        let _ = tx.send(e);
+    }));
+    rx
+}
+
+async fn next_event(rx: &mut mpsc::UnboundedReceiver<ConnectionEvent>) -> ConnectionEvent {
+    tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .expect("no connection event within 5 s")
+        .expect("sink dropped")
+}
+
+/// A UDP socket that never answers: QUIC handshakes to it time out.
+fn black_hole() -> (std::net::UdpSocket, String) {
+    let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let addr = socket.local_addr().unwrap().to_string();
+    (socket, addr)
+}
+
+fn moved_x(events: &[Recorded]) -> i32 {
+    events
+        .iter()
+        .map(|e| match e {
+            Recorded::Move(dx, _) => *dx,
+            _ => 0,
+        })
+        .sum()
+}
+
+#[test]
+fn close_codes_match_the_agent() {
+    assert_eq!(
+        rust_lib_lanpilot::error::CLOSE_DEVICE_REMOVED,
+        lanpilot_agent::session::CLOSE_DEVICE_REMOVED
+    );
+    assert_eq!(
+        rust_lib_lanpilot::error::CLOSE_UNPAIRED,
+        lanpilot_agent::session::CLOSE_UNPAIRED
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn connect_reports_the_session() {
+    let h = Harness::start().await;
+    let (client, info) = paired(&h).await;
+    let session = client
+        .connect(&info.public_key_hex, &info.addrs)
+        .await
+        .unwrap();
+    assert_eq!(session.generation, 1);
+    assert_eq!(session.version, 1);
+    assert_eq!(session.addr, h.addr());
+    assert_eq!(session.server_name, info.name);
+    assert!(session.capabilities.iter().any(|c| c == "zoom"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pointer_and_buttons_reach_the_agent() {
+    let h = Harness::start().await;
+    let (client, info) = paired(&h).await;
+    client
+        .connect(&info.public_key_hex, &info.addrs)
+        .await
+        .unwrap();
+    client.begin_gesture().unwrap();
+    for _ in 0..3 {
+        client.send_pointer(10.0, 0.0).unwrap();
+    }
+    h.wait_for("30 px of motion", |e| moved_x(e) == 30).await;
+    client.button(MouseButtonKind::Left, true).await.unwrap();
+    client.button(MouseButtonKind::Left, false).await.unwrap();
+    h.wait_for("left click", |e| {
+        e.contains(&Recorded::Button(InMouse::Left, true))
+            && e.contains(&Recorded::Button(InMouse::Left, false))
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn scroll_keys_media_and_zoom_reach_the_agent() {
+    let h = Harness::start().await;
+    let (client, info) = paired(&h).await;
+    client
+        .connect(&info.public_key_hex, &info.addrs)
+        .await
+        .unwrap();
+    client.begin_gesture().unwrap();
+    client.send_scroll(0.0, 1.5).unwrap();
+    h.wait_for("scroll", |e| {
+        e.iter()
+            .any(|x| matches!(x, Recorded::Scroll(_, y) if *y > 1.4))
+    })
+    .await;
+    client.key_chord(vec![0xE0, 0x06]).await.unwrap();
+    client.media(MediaKind::PlayPause).await.unwrap();
+    client.zoom(2.0).await.unwrap();
+    h.wait_for("chord, media and zoom", |e| {
+        e.contains(&Recorded::Key(HidUsage(0x06), true))
+            && e.contains(&Recorded::Media(MediaKey::PlayPause))
+            && e.contains(&Recorded::Scroll(0.0, 2.0))
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn requests_report_agent_errors() {
+    let h = Harness::start().await;
+    let (client, info) = paired(&h).await;
+    client
+        .connect(&info.public_key_hex, &info.addrs)
+        .await
+        .unwrap();
+    let e = client.zoom(f32::NAN).await.unwrap_err();
+    assert_eq!(e.kind, ErrorKind::RequestFailed);
+    // The control stream is still in sync afterwards.
+    client.media(MediaKind::Mute).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn input_without_a_session_is_not_connected() {
+    let client = new_client();
+    assert_eq!(
+        client.send_pointer(1.0, 1.0).unwrap_err().kind,
+        ErrorKind::NotConnected
+    );
+    assert_eq!(
+        client.begin_gesture().unwrap_err().kind,
+        ErrorKind::NotConnected
+    );
+    let e = client.media(MediaKind::Mute).await.unwrap_err();
+    assert_eq!(e.kind, ErrorKind::NotConnected);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_live_address_wins_the_race() {
+    let h = Harness::start().await;
+    let (client, info) = paired(&h).await;
+    let (_hole, dead) = black_hole();
+    let started = Instant::now();
+    let session = client
+        .connect(&info.public_key_hex, &[dead, h.addr()])
+        .await
+        .unwrap();
+    assert_eq!(session.addr, h.addr());
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        started.elapsed()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_dead_address_times_out() {
+    let (_hole, dead) = black_hole();
+    let client = new_client();
+    let e = client.connect(&"ab".repeat(32), &[dead]).await.unwrap_err();
+    assert_eq!(e.kind, ErrorKind::Timeout);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn connect_rejects_bad_input() {
+    let client = new_client();
+    let e = client
+        .connect("not hex", &["10.0.0.1:1".into()])
+        .await
+        .unwrap_err();
+    assert_eq!(e.kind, ErrorKind::InvalidInput);
+    let e = client.connect(&"ab".repeat(32), &[]).await.unwrap_err();
+    assert_eq!(e.kind, ErrorKind::InvalidInput);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn wrong_server_key_is_a_mismatch() {
+    let h = Harness::start().await;
+    let (client, _info) = paired(&h).await;
+    let other = Identity::generate().public_key();
+    let e = client
+        .connect(&hex::encode(other.as_bytes()), &[h.addr()])
+        .await
+        .unwrap_err();
+    assert_eq!(e.kind, ErrorKind::ServerKeyMismatch);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn reconnect_replaces_the_session() {
+    let h = Harness::start().await;
+    let (client, info) = paired(&h).await;
+    let mut events = sink(&client);
+    client
+        .connect(&info.public_key_hex, &info.addrs)
+        .await
+        .unwrap();
+    let second = client
+        .connect(&info.public_key_hex, &info.addrs)
+        .await
+        .unwrap();
+    assert_eq!(second.generation, 2);
+    let first_closed = next_event(&mut events).await;
+    assert_eq!(
+        (first_closed.generation, first_closed.reason),
+        (1, CloseReason::Local)
+    );
+    client.media(MediaKind::Next).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn disconnect_waits_for_an_in_flight_connect() {
+    let h = Harness::start().await;
+    let (client, info) = paired(&h).await;
+    let client = Arc::new(client);
+    let connecting = {
+        let client = client.clone();
+        let info = info.clone();
+        tokio::spawn(async move { client.connect(&info.public_key_hex, &info.addrs).await })
+    };
+    // Give the spawned connect time to take the operations lock; the
+    // handshake itself is still in flight or just done, and the disconnect
+    // must end up closing whatever it produced. (There is no hook to observe
+    // the lock, and a yield alone leaves the spawned task unscheduled on a
+    // multi-thread runtime.)
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    client.disconnect().await;
+    let _ = connecting.await.unwrap();
+    // Whatever order they ran in, nothing may be left connected.
+    assert_eq!(
+        client.send_pointer(1.0, 0.0).unwrap_err().kind,
+        ErrorKind::NotConnected
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn unpair_closes_with_unpaired() {
+    let h = Harness::start().await;
+    let (client, info) = paired(&h).await;
+    let mut events = sink(&client);
+    let session = client
+        .connect(&info.public_key_hex, &info.addrs)
+        .await
+        .unwrap();
+    client.unpair().await.unwrap();
+    let event = next_event(&mut events).await;
+    assert_eq!(
+        (event.generation, event.reason),
+        (session.generation, CloseReason::Unpaired)
+    );
+    assert!(h.agent.store().list().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn removal_on_the_computer_is_reported() {
+    let h = Harness::start().await;
+    let client = new_client();
+    let info = client.pair_with_uri(&h.uri()).await.unwrap();
+    let mut events = sink(&client);
+    client
+        .connect(&info.public_key_hex, &info.addrs)
+        .await
+        .unwrap();
+    let phone_key = h.agent.store().list()[0].public_key;
+    h.agent.store().remove(&phone_key).unwrap();
+    let event = next_event(&mut events).await;
+    assert_eq!(event.reason, CloseReason::DeviceRemoved);
+    let e = client
+        .connect(&info.public_key_hex, &info.addrs)
+        .await
+        .unwrap_err();
+    assert_eq!(e.kind, ErrorKind::NotPaired);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn reset_endpoint_then_connect_works() {
+    let h = Harness::start().await;
+    let (client, info) = paired(&h).await;
+    let mut events = sink(&client);
+    client
+        .connect(&info.public_key_hex, &info.addrs)
+        .await
+        .unwrap();
+    client.reset_endpoint().await;
+    assert_eq!(next_event(&mut events).await.reason, CloseReason::Local);
+    let session = client
+        .connect(&info.public_key_hex, &info.addrs)
+        .await
+        .unwrap();
+    assert_eq!(session.generation, 2);
 }
