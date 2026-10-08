@@ -25,6 +25,7 @@ tracing = "0.1"
 if-addrs = "0.13"
 qrcode = { version = "0.14", default-features = false }
 prost = "0.13"
+tokio-util = { version = "0.7", features = ["rt"] }
 clap = { version = "4", features = ["derive"] }
 rpassword = "7"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

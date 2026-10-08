@@ -24,6 +24,7 @@ struct Harness {
     agent: Arc<Agent>,
     addr: SocketAddr,
     events: RecordingHandle,
+    endpoint: quinn::Endpoint,
 }
 
 async fn start(text: bool) -> Harness {
@@ -33,13 +34,14 @@ async fn start(text: bool) -> Harness {
     let agent = Agent::new(&paths, Box::new(backend)).unwrap();
     let endpoint = agent.bind("127.0.0.1:0".parse().unwrap()).unwrap();
     let addr = endpoint.local_addr().unwrap();
-    tokio::spawn(agent.clone().serve(endpoint));
+    tokio::spawn(agent.clone().serve(endpoint.clone()));
     Harness {
         _dir: dir,
         paths,
         agent,
         addr,
         events,
+        endpoint,
     }
 }
 
@@ -232,18 +234,55 @@ async fn unpaired_client_cannot_open_a_session() {
     let conn = connect_paired(&endpoint, h.addr, &h.agent.public_key())
         .await
         .unwrap();
+    // Datagrams sent while the server waits in accept_authorized must be ignored.
+    for seq in 1..=3 {
+        let _ = conn.send_datagram(
+            PointerDatagram {
+                gesture: Some(gs(1, seq, 50.0, 0.0)),
+            }
+            .encode_to_vec()
+            .into(),
+        );
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
     let result = open_session(&conn, &local_hello("x", Os::Ios, "0.1.0", &[])).await;
     assert!(result.is_err());
-    // Datagrams from an unauthorized connection never reach the backend.
-    let _ = conn.send_datagram(
-        PointerDatagram {
-            gesture: Some(gs(1, 1, 50.0, 0.0)),
-        }
-        .encode_to_vec()
-        .into(),
+    let reason = tokio::time::timeout(Duration::from_secs(5), conn.closed())
+        .await
+        .unwrap();
+    assert!(
+        matches!(&reason, quinn::ConnectionError::ApplicationClosed(a)
+            if a.error_code == lanpilot_core::session::CLOSE_NOT_PAIRED.into()),
+        "{reason:?}"
     );
-    tokio::time::sleep(Duration::from_millis(300)).await;
     assert!(h.events.events().is_empty());
+    assert!(!h.agent.store().contains(&stranger.public_key()));
+}
+
+#[tokio::test]
+async fn shutdown_releases_held_buttons() {
+    let h = start(true).await;
+    let c = pair(&h).await;
+    let (conn, mut s) = session(&h, &c).await;
+    let r = request(
+        &mut s,
+        1,
+        client_message::Body::PointerButton(PointerButton {
+            button: MouseButton::Left as i32,
+            down: true,
+            gesture: None,
+        }),
+    )
+    .await;
+    assert!(matches!(r.body, Some(server_message::Body::Ack(_))));
+    h.agent.shutdown(&h.endpoint).await;
+    assert_eq!(
+        h.events.events().last(),
+        Some(&Recorded::Button(InMouse::Left, false))
+    );
+    tokio::time::timeout(Duration::from_secs(5), conn.closed())
+        .await
+        .unwrap();
 }
 
 #[tokio::test]

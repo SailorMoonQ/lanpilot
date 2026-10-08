@@ -177,7 +177,7 @@ fn run(paths: &Paths, pair: bool) -> Result<(), AgentError> {
         let serving = tokio::spawn(agent.clone().serve(endpoint.clone()));
         tokio::signal::ctrl_c().await?;
         tracing::info!("shutting down");
-        endpoint.close(0u32.into(), b"agent shutting down");
+        agent.shutdown(&endpoint).await;
         serving.abort();
         Ok::<(), AgentError>(())
     })

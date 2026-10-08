@@ -12,7 +12,7 @@ use lanpilot_core::identity::{Identity, PublicKey};
 use lanpilot_core::pairing::flow::serve_pairing;
 use lanpilot_core::pairing::invite::Invite;
 use lanpilot_core::quinn;
-use lanpilot_core::session::{Opened, accept_authorized, answer_hello, local_hello};
+use lanpilot_core::session::{Opened, SessionError, accept_authorized, answer_hello, local_hello};
 use lanpilot_core::transport::{peer_public_key, server_endpoint};
 use lanpilot_core::version::{PROTO_MAX, PROTO_MIN};
 use lanpilot_input::InputBackend;
@@ -20,6 +20,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::time::timeout;
+use tokio_util::task::TaskTracker;
 
 pub const OPEN_TIMEOUT: Duration = Duration::from_secs(10);
 pub const PAIRING_TIMEOUT: Duration = Duration::from_secs(30);
@@ -31,6 +32,7 @@ pub struct Agent {
     pairing: Arc<AgentPairing>,
     input: SharedInput,
     supports_text: bool,
+    tasks: TaskTracker,
     _watcher: notify::RecommendedWatcher,
 }
 
@@ -54,6 +56,7 @@ impl Agent {
             pairing,
             input: Arc::new(Mutex::new(input)),
             supports_text,
+            tasks: TaskTracker::new(),
             _watcher: watcher,
         }))
     }
@@ -101,8 +104,23 @@ impl Agent {
     pub async fn serve(self: Arc<Self>, endpoint: quinn::Endpoint) {
         while let Some(incoming) = endpoint.accept().await {
             let agent = self.clone();
-            tokio::spawn(async move { agent.handle(incoming).await });
+            self.tasks
+                .spawn(async move { agent.handle(incoming).await });
         }
+    }
+
+    /// Closes the endpoint and waits for live connections to finish, so each
+    /// session releases held input and the phones see the close.
+    pub async fn shutdown(&self, endpoint: &quinn::Endpoint) {
+        endpoint.close(0u32.into(), b"agent shutting down");
+        self.tasks.close();
+        if timeout(Duration::from_secs(5), self.tasks.wait())
+            .await
+            .is_err()
+        {
+            tracing::warn!("timed out waiting for sessions to end");
+        }
+        let _ = timeout(Duration::from_secs(2), endpoint.wait_idle()).await;
     }
 
     async fn handle(self: Arc<Self>, incoming: quinn::Incoming) {
@@ -117,8 +135,12 @@ impl Agent {
                 return;
             }
         };
-        let Ok(peer) = peer_public_key(&conn) else {
-            return;
+        let peer = match peer_public_key(&conn) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::debug!("no usable peer key: {e}");
+                return;
+            }
         };
         let who = peer.short_id();
         let store = self.store.clone();
@@ -182,7 +204,8 @@ impl Agent {
                         .await;
                         tracing::info!("{who}: session ended");
                     }
-                    Err(e) => tracing::info!("{who}: {e}"),
+                    Err(e @ SessionError::Version(_)) => tracing::info!("{who}: {e}"),
+                    Err(e) => tracing::debug!("{who}: hello failed: {e}"),
                 }
             }
         }
